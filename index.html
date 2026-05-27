@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MATRIX // Global Intelligence Console</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <div id="welcomeBackdrop" class="welcome-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="welcomeTitle">
+        <div class="welcome-modal">
+          <div class="welcome-mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64" width="64" height="64">
+              <defs>
+                <linearGradient id="welcomeGrad" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#48a6ff"/>
+                  <stop offset="1" stop-color="#ff4fa3"/>
+                </linearGradient>
+              </defs>
+              <circle cx="32" cy="32" r="28" fill="none" stroke="url(#welcomeGrad)" stroke-width="2"/>
+              <circle cx="32" cy="32" r="20" fill="none" stroke="url(#welcomeGrad)" stroke-width="1" opacity="0.5"/>
+              <path d="M10 32h44M32 10v44M16 16l32 32M48 16L16 48" stroke="url(#welcomeGrad)" stroke-width="1" opacity="0.6"/>
+              <circle cx="32" cy="32" r="6" fill="url(#welcomeGrad)"/>
+            </svg>
+          </div>
+          <p class="welcome-eyebrow"><span class="welcome-led"></span> MATRIX // INTEL CONSOLE</p>
+          <h2 id="welcomeTitle">Welcome to MATRIX AI Intelligence Server</h2>
+          <p class="welcome-sub">Real-time global awareness across 25+ open intelligence sources — seismic, aviation, satellites, breaking news, AI &amp; POE2 video, live cameras, and a voice agent.</p>
+          <ul class="welcome-bullets">
+            <li>180+ aircraft tracked across 35 regions worldwide</li>
+            <li>Live Bay Area camera feeds (SF, Bay Bridge, Golden Gate, Pier 39, US-101)</li>
+            <li>Breaking news from 17 sources with AI voice agent</li>
+          </ul>
+          <button id="welcomeOk" type="button" class="welcome-ok" autofocus>OK · Engage Console</button>
+        </div>
+      </div>
+
+      <aside id="webView" class="webview hidden" role="dialog" aria-modal="true" aria-labelledby="webViewTitle">
+        <header class="webview-head">
+          <div class="webview-meta">
+            <span class="webview-source" id="webViewSource">--</span>
+            <h2 id="webViewTitle">--</h2>
+          </div>
+          <div class="webview-actions">
+            <a id="webViewExternal" class="webview-btn" target="_blank" rel="noreferrer">Open externally ↗</a>
+            <button id="webViewClose" type="button" class="webview-btn webview-close" aria-label="Close">CLOSE ×</button>
+          </div>
+        </header>
+        <div class="webview-body">
+          <iframe id="webViewFrame" src="about:blank" sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-popups-to-escape-sandbox" referrerpolicy="no-referrer-when-downgrade"></iframe>
+          <div id="webViewFallback" class="webview-fallback hidden">
+            <h3>This source blocks embedded preview</h3>
+            <p>Some publishers (CNN, Reuters, NYT, etc.) explicitly forbid iframe display via their security headers. Use the button above to open the page in a new tab.</p>
+          </div>
+        </div>
+      </aside>
+
+      <header class="command-header">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="32" height="32">
+              <defs>
+                <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#48a6ff"/>
+                  <stop offset="1" stop-color="#ff4fa3"/>
+                </linearGradient>
+              </defs>
+              <circle cx="16" cy="16" r="14" fill="none" stroke="url(#brandGrad)" stroke-width="2"/>
+              <path d="M5 16h22M16 5v22M9 9l14 14M23 9L9 23" stroke="url(#brandGrad)" stroke-width="1" opacity="0.7"/>
+              <circle cx="16" cy="16" r="3" fill="url(#brandGrad)"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <p class="eyebrow"><span class="status-led"></span> MATRIX // INTEL CONSOLE</p>
+            <h1>Global Awareness Grid</h1>
+            <p class="brand-sub" id="brandSub">Fusing live signal from 25+ open intelligence sources</p>
+          </div>
+        </div>
+        <nav class="command-tabs" aria-label="Command modes">
+          <button type="button" data-mode="live" class="active" aria-pressed="true">Live</button>
+          <button type="button" data-mode="timeline" aria-pressed="false">Timeline</button>
+          <button type="button" data-mode="signals" aria-pressed="false">Signals</button>
+          <button type="button" data-mode="cameras" aria-pressed="false">Cameras</button>
+        </nav>
+        <div class="header-actions">
+          <button id="fullscreenButton" type="button" class="iconbtn" title="Full Screen">
+            <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>
+            <span>Full Screen</span>
+          </button>
+          <button id="autoRotateButton" type="button" aria-pressed="true" class="iconbtn">
+            <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 10a7 7 0 1 0 2-4.95M5 3v3h3"/></svg>
+            <span>Pause Rotate</span>
+          </button>
+          <button id="soundToggle" type="button" aria-pressed="false" class="iconbtn">
+            <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8v4h3l4 3V5L7 8H4M14 7a4 4 0 0 1 0 6"/></svg>
+            <span>Sound</span>
+          </button>
+          <button id="voiceToggle" type="button" aria-pressed="false" class="iconbtn" title="Live AI voice agent reads breaking-news headlines aloud">
+            <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 3v11M6 6v5M14 6v5M3 8v1M17 8v1M7 17h6"/></svg>
+            <span>AI Voice</span>
+          </button>
+          <button id="refreshButton" type="button" class="iconbtn primary">
+            <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 10a7 7 0 1 1 7 7M17 17v-4h-4"/></svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="top-bars" aria-label="Markets and tech ticker">
+        <div class="crypto-bar" id="cryptoBar" aria-label="Crypto markets">
+          <span class="crypto-bar-label">CRYPTO</span>
+          <div class="crypto-bar-track" id="cryptoBarTrack"></div>
+        </div>
+        <div class="hn-ticker" id="hnTicker" aria-label="Hacker News top stories">
+          <span class="hn-ticker-label">HN TOP</span>
+          <div class="hn-ticker-track" id="hnTickerTrack"></div>
+        </div>
+      </section>
+
+      <section class="dashboard">
+        <aside class="panel layer-panel" aria-label="Intelligence layers">
+          <div class="panel-title">
+            <span>Source Layers</span>
+            <button id="allLayersButton" type="button" class="ghost-btn">All</button>
+          </div>
+          <div id="layerControls" class="layer-controls"></div>
+          <div class="system-status">
+            <div>
+              <strong id="activeCount">0</strong>
+              <span>Active signals</span>
+            </div>
+            <div>
+              <strong id="sourceCount">0</strong>
+              <span>Live sources</span>
+            </div>
+            <div>
+              <strong id="lastUpdated">--</strong>
+              <span>Last update</span>
+            </div>
+          </div>
+          <div class="panel-title compact"><span>Intel Widgets</span><small id="intelMeta">--</small></div>
+          <div id="intelPanel" class="intel-panel"></div>
+        </aside>
+
+        <section class="globe-wrap" aria-label="3D intelligence globe">
+          <div id="globe"></div>
+          <div id="eventPopup" class="event-popup hidden" role="status" aria-live="polite"></div>
+          <div id="mapTooltip" class="map-tooltip hidden" role="tooltip"></div>
+          <div class="hud-strip" id="hudStrip">
+            <div class="hud-left">
+              <span class="pulse-dot"></span>
+              <strong id="feedState">Connecting to live feeds</strong>
+            </div>
+            <div class="hud-right" id="hudSourceCount">--</div>
+          </div>
+          <div class="globe-watermark">
+            <span>MATRIX // ORBITAL VIEW</span>
+            <small id="globeClock">--:--:-- UTC</small>
+          </div>
+        </section>
+
+        <aside class="panel right-panel" aria-label="Live cameras and alerts">
+          <div class="panel-title">
+            <span>Live Camera Grid</span>
+            <small id="cameraCount">0 online</small>
+          </div>
+          <div id="cameraGrid" class="camera-grid-side"></div>
+
+          <div class="panel-title compact">
+            <span>Live Alerts</span>
+            <small id="visibleCount">0 visible</small>
+          </div>
+          <div id="detailPanel" class="detail-panel hidden"></div>
+          <div id="alertFeed" class="alert-feed"></div>
+        </aside>
+      </section>
+
+      <section class="bottom-stack" aria-label="Bottom intelligence row">
+        <div id="breakingPopup" class="breaking-popup hidden" role="alert" aria-live="assertive"></div>
+        <div class="news-rail" id="newsRail">
+          <div class="news-rail-head">
+            <span class="rail-title" id="railTitle">Breaking Newswire</span>
+            <small id="newsMeta">--</small>
+          </div>
+          <div class="news-rail-track" id="newsTrack"></div>
+        </div>
+        <footer class="bottom-command" aria-label="Global intelligence telemetry">
+          <div><span>Mode</span><strong id="modeTelemetry">Live Fusion</strong></div>
+          <div><span>Aircraft</span><strong id="aircraftTelemetry">--</strong></div>
+          <div><span>Satellites</span><strong id="satelliteTelemetry">--</strong></div>
+          <div><span>Cameras</span><strong id="cameraTelemetry">--</strong></div>
+          <div><span>Weather</span><strong id="weatherTelemetry">--</strong></div>
+          <div><span>Seismic</span><strong id="seismicTelemetry">--</strong></div>
+          <div><span>News</span><strong id="newsTelemetry">--</strong></div>
+          <div><span>Selected</span><strong id="selectedTelemetry">None</strong></div>
+        </footer>
+      </section>
+    </main>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./vendor/three.module.min.js"
+        }
+      }
+    </script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

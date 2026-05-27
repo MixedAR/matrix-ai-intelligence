@@ -1,0 +1,27 @@
+# Node modules (we vendored what we need into vendor/satellite.js/)
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Local-only Claude config
+.claude/
+
+# Local runtime artefacts
+/tmp/
+*.log
+matrix-ai-intelligence-local.tar.gz*
+*.crdownload
+
+# Local launch config (Railway uses Procfile + railway.json)
+launch.json

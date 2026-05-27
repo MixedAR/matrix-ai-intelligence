@@ -1,0 +1,12 @@
+# Nixpacks tells Railway exactly what to build.
+# We need Python 3.12+ and the `curl` binary (TTS proxy + RSS fallback shell out to it).
+# No pip dependencies — the server uses only stdlib.
+
+[phases.setup]
+nixPkgs = ["python312", "curl"]
+
+[phases.install]
+cmds = ["echo 'no python deps'"]
+
+[start]
+cmd = "python3 matrix_server.py"

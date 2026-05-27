@@ -1,0 +1,17 @@
+{
+  "name": "codex",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "start": "python3 matrix_server.py",
+    "verify": "node verify_render.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "playwright": "^1.60.0",
+    "satellite.js": "^7.0.1"
+  }
+}

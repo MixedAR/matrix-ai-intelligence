@@ -1,0 +1,2 @@
+# matrix_server.py runs on Python standard library only.
+# This file exists to nudge Railway / nixpacks toward the Python builder.
