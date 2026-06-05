@@ -1357,20 +1357,7 @@ def build_payload() -> dict[str, Any]:
 
 
 NEWS_FEEDS = [
-    # World / breaking
-    ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml", "world"),
-    ("Reuters World", "https://www.reutersagency.com/feed/?best-regions=africa,asia,europe,middle-east,north-america,south-america&post_type=best", "world"),
-    ("NPR News", "https://feeds.npr.org/1001/rss.xml", "us"),
-    ("DW World", "https://rss.dw.com/rdf/rss-en-world", "world"),
-    ("France24", "https://www.france24.com/en/rss", "world"),
-    ("Guardian World", "https://www.theguardian.com/world/rss", "world"),
-    ("CNN Top Stories", "http://rss.cnn.com/rss/cnn_topstories.rss", "world"),
-    # Business / tech / science / defense
-    ("CNBC Business", "https://www.cnbc.com/id/10001147/device/rss/rss.html", "business"),
-    ("Hacker News", "https://hnrss.org/frontpage", "tech"),
-    ("NASA Breaking", "https://www.nasa.gov/news-release/feed/", "science"),
-    ("Defense News", "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", "defense"),
-    # Artificial intelligence — expanded
+    # Artificial intelligence — THE PRIMARY (and essentially only) news focus
     ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/", "ai"),
     ("MIT Tech Review", "https://www.technologyreview.com/feed/", "ai"),
     ("VentureBeat AI", "https://venturebeat.com/category/ai/feed", "ai"),
@@ -1381,23 +1368,26 @@ NEWS_FEEDS = [
     ("Hugging Face", "https://huggingface.co/blog/feed.xml", "ai"),
     ("Synced Review", "https://syncedreview.com/feed/", "ai"),
     ("Apple ML", "https://machinelearning.apple.com/rss.xml", "ai"),
-    # California / Bay Area — filtered to major breaking only via CALIFORNIA_BREAKING_RE
-    ("LA Times California", "https://www.latimes.com/california/rss2.0.xml", "california"),
-    ("CalMatters", "https://calmatters.org/feed/", "california"),
-    ("KCRA Sacramento", "https://www.kcra.com/topstories-rss", "california"),
-    ("KRON4 Bay Area", "https://www.kron4.com/news/feed/", "california"),
-    ("Berkeleyside", "https://www.berkeleyside.org/feed", "california"),
+    # World feeds scanned for EMERGENCY-level breaking ONLY (safety channel).
+    # Non-emergency items from these feeds are dropped.
+    ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml", "world"),
+    ("Reuters World", "https://www.reutersagency.com/feed/?best-regions=africa,asia,europe,middle-east,north-america,south-america&post_type=best", "world"),
+    ("CNN Top Stories", "http://rss.cnn.com/rss/cnn_topstories.rss", "world"),
+    ("Guardian World", "https://www.theguardian.com/world/rss", "world"),
+    ("NPR News", "https://feeds.npr.org/1001/rss.xml", "us"),
 ]
 
-# A California item is only kept if its title OR summary mentions one of these tokens.
-# This collapses the local-news firehose down to genuinely major events.
-CALIFORNIA_BREAKING_RE = re.compile(
-    r"\b(breaking|urgent|emergency|killed|dead|fatal|shooting|gunman|shot|stabbed|"
-    r"earthquake|quake|wildfire|fire|flood|tsunami|landslide|evacuat|"
-    r"crash|collision|explosion|blast|raid|arrest|indictment|conviction|verdict|"
-    r"murder|stabbing|kidnap|attack|hostage|riot|protest|missing|amber\s*alert|"
-    r"power\s*outage|outage|shutdown|state\s*of\s*emergency|disaster|"
-    r"officer-involved|police\s*shoot|robber|assault)\b",
+# Emergency-level breaking news filter applied to the world/us feeds. Only items
+# matching one of these high-severity tokens survive (then they are re-tagged
+# category "emergency"). Everything else from those feeds is discarded so the
+# rail stays AI-focused with only genuinely major world events alongside.
+EMERGENCY_RE = re.compile(
+    r"\b(breaking|emergency|killed|dead|death\s*toll|fatal|mass\s*shooting|shooting|"
+    r"gunman|attack|terror|terrorist|bombing|explosion|blast|earthquake|magnitude|"
+    r"tsunami|hurricane|typhoon|cyclone|wildfire|flood|landslide|evacuat|disaster|"
+    r"\bwar\b|invasion|airstrike|missile|nuclear|outbreak|pandemic|hostage|collapse|"
+    r"state\s*of\s*emergency|martial\s*law|coup|assassinat|catastroph|derail|"
+    r"plane\s*crash|train\s*crash)\b",
     re.IGNORECASE,
 )
 
@@ -1691,16 +1681,20 @@ def build_news_payload() -> dict[str, Any]:
         try:
             xml_text = fetch_text(url, timeout=10)
             parsed = parse_rss(xml_text, source, category, limit=10)
-            # California feeds are gated to MAJOR breaking news only.
-            # We don't want the firehose of local stories — just the things you'd
-            # see lead a TV broadcast.
-            if category == "california":
-                parsed = [
-                    item for item in parsed
-                    if CALIFORNIA_BREAKING_RE.search(f"{item.get('title','')} {item.get('summary','')}")
-                ]
-            if parsed:
-                items.extend(parsed)
+            if category == "ai":
+                kept = parsed  # AI is the focus — keep everything
+            elif category in ("world", "us"):
+                # World/US feeds contribute ONLY emergency-level items, re-tagged.
+                kept = []
+                for item in parsed:
+                    blob = f"{item.get('title','')} {item.get('summary','')}"
+                    if EMERGENCY_RE.search(blob):
+                        item["category"] = "emergency"
+                        kept.append(item)
+            else:
+                kept = []  # any other category dropped entirely
+            if kept:
+                items.extend(kept)
                 if source not in sources:
                     sources.append(source)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError,
@@ -1708,14 +1702,13 @@ def build_news_payload() -> dict[str, Any]:
                 subprocess.TimeoutExpired) as exc:
             errors.append(f"{source}: {exc}")
     items.sort(key=lambda item: item.get("time") or "", reverse=True)
-    # Category-balanced selection. AI gets a fatter slice (user explicitly wants
-    # more AI coverage); California is already keyword-filtered so we don't
-    # need a large cap there.
+    # AI-only feed (plus a thin emergency safety channel). DEFAULT_CAP 0 means
+    # any stray non-ai/non-emergency category is dropped.
     PER_CATEGORY_CAPS = {
-        "ai": 26,
-        "california": 6,
+        "ai": 80,
+        "emergency": 12,
     }
-    DEFAULT_CAP = 14
+    DEFAULT_CAP = 0
     by_cat: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         cat = item.get("category") or "world"

@@ -25,7 +25,19 @@ const state = {
   events: [],
   news: [],
   intel: [],
-  activeLayers: new Set(layers.map((layer) => layer.id)),
+  // Cameras-only by default — every other source layer starts OFF.
+  // Persisted so a user's toggle choices survive reloads.
+  activeLayers: (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("matrix.activeLayers") || "null");
+      if (Array.isArray(saved) && saved.length) return new Set(saved);
+    } catch (_) {}
+    return new Set(["camera"]);
+  })(),
+  newsScrollMs: (() => {
+    const v = parseInt(localStorage.getItem("matrix.newsScrollMs") || "30000", 10);
+    return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 30000;
+  })(),
   markers: new Map(),
   markerObjects: [],
   selectedId: null,
@@ -64,6 +76,13 @@ const els = {
   globe: document.querySelector("#globe"),
   layerControls: document.querySelector("#layerControls"),
   allLayersButton: document.querySelector("#allLayersButton"),
+  noneLayersButton: document.querySelector("#noneLayersButton"),
+  sourcesButton: document.querySelector("#sourcesButton"),
+  sourcesPopover: document.querySelector("#sourcesPopover"),
+  speedSlider: document.querySelector("#speedSlider"),
+  speedVal: document.querySelector("#speedVal"),
+  speedSlower: document.querySelector("#speedSlower"),
+  speedFaster: document.querySelector("#speedFaster"),
   alertFeed: document.querySelector("#alertFeed"),
   eventPopup: document.querySelector("#eventPopup"),
   activeCount: document.querySelector("#activeCount"),
@@ -130,7 +149,9 @@ controls.rotateSpeed = 0.55;
 
 const globeGroup = new THREE.Group();
 const markerGroup = new THREE.Group();
-scene.add(globeGroup, markerGroup);
+const newsFlagGroup = new THREE.Group(); // transient AI-news flagpole markers
+scene.add(globeGroup, markerGroup, newsFlagGroup);
+const newsFlags = []; // { group, until, dispose }
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const iconTextures = new Map();
@@ -410,6 +431,205 @@ function latLngToVector3(lat, lon, radius = 2.08) {
     radius * Math.cos(phi),
     radius * Math.sin(phi) * Math.sin(theta),
   );
+}
+
+/* === AI news geocoding + flagpole markers ===
+ * News items carry no coordinates, so we geocode by scanning the headline +
+ * summary against a gazetteer of AI orgs and major world places. AI items with
+ * no match default to the San Francisco Bay Area (the AI hub). When a new item
+ * arrives we plant a flagpole with a banner showing the headline at that spot
+ * for 30 seconds, then remove it. */
+const NEWS_GAZETTEER = [
+  // AI orgs / labs -> HQ
+  ["openai", [37.7749, -122.4194]], ["anthropic", [37.7749, -122.4194]],
+  ["claude", [37.7749, -122.4194]], ["chatgpt", [37.7749, -122.4194]],
+  ["google deepmind", [51.5336, -0.1276]], ["deepmind", [51.5336, -0.1276]],
+  ["google", [37.422, -122.084]], ["gemini", [37.422, -122.084]],
+  ["microsoft", [47.6396, -122.1283]], ["copilot", [47.6396, -122.1283]],
+  ["meta", [37.4847, -122.1477]], ["llama", [37.4847, -122.1477]],
+  ["nvidia", [37.3708, -121.9648]], ["apple", [37.3349, -122.009]],
+  ["amazon", [47.6062, -122.3321]], ["aws", [47.6062, -122.3321]],
+  ["xai", [37.7749, -122.4194]], ["grok", [37.7749, -122.4194]],
+  ["tesla", [30.2226, -97.6189]], ["mistral", [48.8566, 2.3522]],
+  ["hugging face", [40.7128, -74.006]], ["perplexity", [37.7749, -122.4194]],
+  ["deepseek", [30.2741, 120.1551]], ["alibaba", [30.2741, 120.1551]],
+  ["qwen", [30.2741, 120.1551]], ["tencent", [22.5431, 114.0579]],
+  ["baidu", [39.9042, 116.4074]], ["bytedance", [39.9042, 116.4074]],
+  ["samsung", [37.5665, 126.978]], ["tsmc", [24.7736, 120.9938]],
+  ["softbank", [35.6762, 139.6503]], ["ibm", [41.1076, -73.7202]],
+  ["intel", [37.3879, -121.9648]], ["amd", [37.3879, -121.9648]],
+  ["oracle", [30.2226, -97.6189]], ["salesforce", [37.7897, -122.3972]],
+  // Major world places (for emergency items + place mentions in AI news)
+  ["san francisco", [37.7749, -122.4194]], ["silicon valley", [37.3875, -122.0575]],
+  ["new york", [40.7128, -74.006]], ["washington", [38.9072, -77.0369]],
+  ["london", [51.5074, -0.1278]], ["paris", [48.8566, 2.3522]],
+  ["berlin", [52.52, 13.405]], ["brussels", [50.8503, 4.3517]],
+  ["tokyo", [35.6762, 139.6503]], ["beijing", [39.9042, 116.4074]],
+  ["shanghai", [31.2304, 121.4737]], ["hong kong", [22.3193, 114.1694]],
+  ["seoul", [37.5665, 126.978]], ["singapore", [1.3521, 103.8198]],
+  ["new delhi", [28.6139, 77.209]], ["delhi", [28.6139, 77.209]],
+  ["mumbai", [19.076, 72.8777]], ["bangalore", [12.9716, 77.5946]],
+  ["dubai", [25.2048, 55.2708]], ["tel aviv", [32.0853, 34.7818]],
+  ["moscow", [55.7558, 37.6173]], ["kyiv", [50.4501, 30.5234]],
+  ["taiwan", [23.6978, 120.9605]], ["taipei", [25.033, 121.5654]],
+  ["toronto", [43.6532, -79.3832]], ["sydney", [-33.8688, 151.2093]],
+  ["sao paulo", [-23.5558, -46.6396]], ["mexico city", [19.4326, -99.1332]],
+  ["united states", [39.8283, -98.5795]], ["china", [35.8617, 104.1954]],
+  ["india", [20.5937, 78.9629]], ["japan", [36.2048, 138.2529]],
+  ["europe", [50.1109, 8.6821]], ["germany", [51.1657, 10.4515]],
+  ["france", [46.6034, 1.8883]], ["united kingdom", [55.3781, -3.436]],
+  [" uk ", [55.3781, -3.436]], ["israel", [31.0461, 34.8516]],
+  ["ukraine", [48.3794, 31.1656]], ["russia", [61.524, 105.3188]],
+  ["gaza", [31.5, 34.467]], ["korea", [37.5665, 126.978]],
+  ["california", [36.7783, -119.4179]], ["texas", [31.9686, -99.9018]],
+  ["austin", [30.2672, -97.7431]], ["seattle", [47.6062, -122.3321]],
+  ["boston", [42.3601, -71.0589]],
+];
+
+const AI_HUB_DEFAULT = [37.7749, -122.4194]; // SF Bay Area
+
+function geocodeNews(item, isEmergency) {
+  const blob = `${item.title || ""} ${item.summary || ""} ${item.source || ""}`.toLowerCase();
+  let best = null;
+  let bestLen = 0;
+  for (const [key, coord] of NEWS_GAZETTEER) {
+    if (blob.includes(key) && key.length > bestLen) {
+      best = coord;
+      bestLen = key.length;
+    }
+  }
+  if (best) return best;
+  // No place found: AI items default to the AI hub; emergency items get skipped
+  return isEmergency ? null : AI_HUB_DEFAULT;
+}
+
+const flagBannerTextures = new Map();
+
+function makeFlagBannerTexture(item, isEmergency) {
+  const key = `${isEmergency ? "E" : "A"}:${item.id}`;
+  if (flagBannerTextures.has(key)) return flagBannerTextures.get(key);
+  const w = 512, h = 220;
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  const accent = isEmergency ? "#ff3d4f" : "#43e8d8";
+  const accent2 = isEmergency ? "#ff7a1a" : "#48a6ff";
+  // Banner background
+  ctx.fillStyle = "rgba(7, 12, 22, 0.96)";
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 5;
+  roundRect(ctx, 6, 6, w - 12, h - 12, 16);
+  ctx.fill();
+  ctx.stroke();
+  // Left accent bar
+  ctx.fillStyle = accent;
+  roundRect(ctx, 6, 6, 12, h - 12, 6);
+  ctx.fill();
+  // Tag
+  ctx.fillStyle = accent;
+  ctx.font = "800 22px 'JetBrains Mono', monospace";
+  ctx.textBaseline = "top";
+  ctx.fillText(isEmergency ? "● EMERGENCY" : "● AI NEWS", 34, 22);
+  // Source (right aligned)
+  ctx.fillStyle = "rgba(180, 200, 230, 0.8)";
+  ctx.font = "700 18px 'JetBrains Mono', monospace";
+  ctx.textAlign = "right";
+  ctx.fillText((item.source || "").toUpperCase().slice(0, 22), w - 28, 24);
+  ctx.textAlign = "left";
+  // Headline — word-wrapped, up to 4 lines
+  ctx.fillStyle = "#f2f6ff";
+  ctx.font = "700 26px Inter, Arial, sans-serif";
+  const words = (item.title || "").split(/\s+/);
+  const maxWidth = w - 60;
+  let line = "", y = 64;
+  let lines = 0;
+  for (const word of words) {
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, 30, y);
+      line = word; y += 34; lines += 1;
+      if (lines >= 3) break;
+    } else {
+      line = test;
+    }
+  }
+  if (lines < 4 && line) ctx.fillText(line.length > 40 ? line.slice(0, 38) + "…" : line, 30, y);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  flagBannerTextures.set(key, texture);
+  return texture;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+const MAX_NEWS_FLAGS = 6;
+const NEWS_FLAG_TTL_MS = 30000;
+
+function dropNewsFlag(item, isEmergency = false) {
+  const coord = geocodeNews(item, isEmergency);
+  if (!coord) return;
+  const [lat, lon] = coord;
+  const surface = latLngToVector3(lat, lon, 2.0);
+  const outward = surface.clone().normalize();
+
+  const group = new THREE.Group();
+  group.position.copy(surface);
+  group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), outward);
+
+  const accent = isEmergency ? 0xff3d4f : 0x43e8d8;
+  const poleLen = 0.34;
+  // Pole
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.005, 0.007, poleLen, 8),
+    new THREE.MeshBasicMaterial({ color: 0xeaf2ff, depthTest: true }),
+  );
+  pole.position.y = poleLen / 2;
+  group.add(pole);
+  // Base bead at the surface
+  const bead = new THREE.Mesh(
+    new THREE.SphereGeometry(0.018, 12, 12),
+    new THREE.MeshBasicMaterial({ color: accent, depthTest: true }),
+  );
+  group.add(bead);
+  // Banner sprite at the top of the pole (billboards toward camera)
+  const banner = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: makeFlagBannerTexture(item, isEmergency),
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+    }),
+  );
+  banner.scale.set(0.5, 0.215, 1);
+  banner.position.set(0.27, poleLen - 0.02, 0); // beside the pole top like a flag
+  group.add(banner);
+
+  newsFlagGroup.add(group);
+  const entry = {
+    group,
+    until: performance.now() + NEWS_FLAG_TTL_MS,
+    raisedAt: performance.now(),
+    dispose() {
+      newsFlagGroup.remove(group);
+      pole.geometry.dispose(); pole.material.dispose();
+      bead.geometry.dispose(); bead.material.dispose();
+      banner.material.dispose();
+    },
+  };
+  newsFlags.push(entry);
+  // Cap concurrent flags — drop the oldest
+  while (newsFlags.length > MAX_NEWS_FLAGS) {
+    const old = newsFlags.shift();
+    old.dispose();
+  }
 }
 
 function colorForLayer(layerId) {
@@ -1084,9 +1304,16 @@ function renderLayers() {
     input.addEventListener("change", () => {
       if (input.checked) state.activeLayers.add(input.dataset.layer);
       else state.activeLayers.delete(input.dataset.layer);
+      persistLayers();
       renderAll();
     });
   });
+}
+
+function persistLayers() {
+  try {
+    localStorage.setItem("matrix.activeLayers", JSON.stringify([...state.activeLayers]));
+  } catch (_) {}
 }
 
 /* === Camera grid: render all 5 live simultaneously ===
@@ -1329,31 +1556,36 @@ function bindCardClicks() {
  * slide). Older stories step past the left edge until we wrap back to the
  * start. Pauses on hover. Newest items snap to the front via renderNews(). */
 let newsTickerHovered = false;
-const NEWS_STEP_INTERVAL_MS = 30000;
+let newsTickerTimer = null;
+
+function newsTickerStep() {
+  if (newsTickerHovered) return;
+  if (!state.news.length) return;
+  const track = els.newsTrack;
+  if (!track) return;
+  const max = track.scrollWidth - track.clientWidth;
+  if (max <= 0) return;
+  const firstCard = track.querySelector(".news-card, .video-card");
+  if (!firstCard) return;
+  const cs = window.getComputedStyle(track);
+  const gap = parseFloat(cs.columnGap || cs.gap || "10") || 10;
+  const step = firstCard.offsetWidth + gap;
+  let target = track.scrollLeft + step;
+  if (target >= max - 4) target = 0; // wrap back so newest is shown again
+  track.scrollTo({ left: target, behavior: "smooth" });
+}
+
+// (Re)arm the auto-scroll timer at the current state.newsScrollMs interval.
+function armNewsTicker() {
+  if (newsTickerTimer) clearInterval(newsTickerTimer);
+  newsTickerTimer = setInterval(newsTickerStep, state.newsScrollMs);
+}
 
 function startNewsTicker() {
   if (!els.newsTrack) return;
   els.newsTrack.addEventListener("pointerenter", () => { newsTickerHovered = true; });
   els.newsTrack.addEventListener("pointerleave", () => { newsTickerHovered = false; });
-
-  setInterval(() => {
-    if (newsTickerHovered) return;
-    if (!state.news.length) return;
-    const track = els.newsTrack;
-    if (!track) return;
-    const max = track.scrollWidth - track.clientWidth;
-    if (max <= 0) return;
-    const firstCard = track.querySelector(".news-card");
-    if (!firstCard) return;
-    const cs = window.getComputedStyle(track);
-    const gap = parseFloat(cs.columnGap || cs.gap || "10") || 10;
-    const step = firstCard.offsetWidth + gap;
-    let target = track.scrollLeft + step;
-    if (target >= max - 4) {
-      target = 0; // wrap back so newest is shown again
-    }
-    track.scrollTo({ left: target, behavior: "smooth" });
-  }, NEWS_STEP_INTERVAL_MS);
+  armNewsTicker();
 }
 
 /* === Breaking news popup + queue ===
@@ -1434,6 +1666,11 @@ function detectBreakingNews(items) {
     incoming.forEach((item) => state.playedNewsIds.add(item.id));
     persistPlayedNews();
     state.pendingNews.push(...incoming);
+    // Plant a flagpole on the globe at each new item's geographic location.
+    incoming.forEach((item) => {
+      const isEmergency = item.category === "emergency";
+      if (item.category === "ai" || isEmergency) dropNewsFlag(item, isEmergency);
+    });
   }
   state.news = visibleNewsFromRaw();
   showNextBreakingPopup();
@@ -2289,6 +2526,32 @@ function animate(time) {
     globeGroup.rotation.y += 0.0009;
   }
   markerGroup.rotation.y = globeGroup.rotation.y;
+  newsFlagGroup.rotation.y = globeGroup.rotation.y;
+
+  // Expire + animate AI news flagpoles
+  if (newsFlags.length) {
+    const nowp = performance.now();
+    for (let i = newsFlags.length - 1; i >= 0; i--) {
+      const f = newsFlags[i];
+      if (f.until < nowp) {
+        f.dispose();
+        newsFlags.splice(i, 1);
+        continue;
+      }
+      // Raise-in animation (first 500ms) + gentle fade-out in the last 1.2s
+      const age = nowp - f.raisedAt;
+      const remain = f.until - nowp;
+      const rise = Math.min(1, age / 500);
+      const fade = Math.min(1, remain / 1200);
+      f.group.scale.setScalar(rise);
+      f.group.children.forEach((child) => {
+        if (child.material && "opacity" in child.material) {
+          child.material.opacity = fade * (child.isSprite ? 1 : 0.95);
+          child.material.transparent = true;
+        }
+      });
+    }
+  }
 
   // Constant on-screen icon size regardless of zoom.
   // A sprite of fixed WORLD size grows on screen as the camera approaches
@@ -2316,15 +2579,57 @@ function bindControls() {
 
   els.allLayersButton.addEventListener("click", () => {
     state.activeLayers = new Set(layers.map((layer) => layer.id));
-    state.mode = "live";
-    els.commandTabs.forEach((button) => {
-      const active = button.dataset.mode === "live";
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-pressed", String(active));
-    });
-    els.modeTelemetry.textContent = "Live Fusion";
+    persistLayers();
     renderAll();
   });
+
+  if (els.noneLayersButton) {
+    els.noneLayersButton.addEventListener("click", () => {
+      state.activeLayers = new Set();
+      persistLayers();
+      renderAll();
+    });
+  }
+
+  // Sources popover toggle
+  if (els.sourcesButton && els.sourcesPopover) {
+    const closeSources = () => {
+      els.sourcesPopover.classList.add("hidden");
+      els.sourcesButton.setAttribute("aria-expanded", "false");
+      els.sourcesButton.classList.remove("active");
+    };
+    els.sourcesButton.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = els.sourcesPopover.classList.toggle("hidden");
+      els.sourcesButton.setAttribute("aria-expanded", String(!open));
+      els.sourcesButton.classList.toggle("active", !open);
+    });
+    // Click-away + Esc to close
+    document.addEventListener("click", (e) => {
+      if (els.sourcesPopover.classList.contains("hidden")) return;
+      if (els.sourcesPopover.contains(e.target) || els.sourcesButton.contains(e.target)) return;
+      closeSources();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeSources();
+    });
+  }
+
+  // News scroll-speed control (interval in seconds; lower = faster)
+  const applySpeed = (ms) => {
+    state.newsScrollMs = Math.max(3000, Math.min(60000, ms));
+    try { localStorage.setItem("matrix.newsScrollMs", String(state.newsScrollMs)); } catch (_) {}
+    if (els.speedSlider) els.speedSlider.value = String(Math.round(state.newsScrollMs / 1000));
+    if (els.speedVal) els.speedVal.textContent = `${Math.round(state.newsScrollMs / 1000)}s`;
+    armNewsTicker();
+  };
+  if (els.speedSlider) {
+    els.speedSlider.value = String(Math.round(state.newsScrollMs / 1000));
+    if (els.speedVal) els.speedVal.textContent = `${Math.round(state.newsScrollMs / 1000)}s`;
+    els.speedSlider.addEventListener("input", () => applySpeed(parseInt(els.speedSlider.value, 10) * 1000));
+  }
+  if (els.speedSlower) els.speedSlower.addEventListener("click", () => applySpeed(state.newsScrollMs + 3000));
+  if (els.speedFaster) els.speedFaster.addEventListener("click", () => applySpeed(state.newsScrollMs - 3000));
 
   els.refreshButton.addEventListener("click", () => {
     loadEvents().catch((error) => {
