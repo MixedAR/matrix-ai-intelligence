@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import random
@@ -1366,7 +1367,6 @@ NEWS_FEEDS = [
     ("CNN Top Stories", "http://rss.cnn.com/rss/cnn_topstories.rss", "world"),
     # Business / tech / science / defense
     ("CNBC Business", "https://www.cnbc.com/id/10001147/device/rss/rss.html", "business"),
-    ("Wired Tech", "https://www.wired.com/feed/rss", "tech"),
     ("Hacker News", "https://hnrss.org/frontpage", "tech"),
     ("NASA Breaking", "https://www.nasa.gov/news-release/feed/", "science"),
     ("Defense News", "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", "defense"),
@@ -1405,8 +1405,10 @@ CALIFORNIA_BREAKING_RE = re.compile(
 # Topic filters for video feeds. Anything that doesn't mention these tokens
 # in title or description gets skipped (case-insensitive).
 AI_VIDEO_KEYWORDS = re.compile(
-    r"\b(open\s*ai|openai|codex|ai\s*agent|agentic|\bagent[s]?\b|hermes|deepseek|model[s]?|"
-    r"claude|chatgpt|gpt-?\d|llm|llama|mistral|gemini|reasoning)\b",
+    r"(\ba\.?i\.?\b|artificial intelligence|open\s*ai|openai|codex|agent|agentic|hermes|"
+    r"deepseek|\bmodel|claude|anthropic|chatgpt|gpt|\bllm|llama|mistral|gemini|grok|"
+    r"reasoning|neural|robot|automation|copilot|perplexity|desktop|prompt|nvidia|"
+    r"machine learning|\bml\b|inference|fine-?tun|transformer|diffusion|generative)",
     re.IGNORECASE,
 )
 # POE2 / Path of Exile 2 only — strictly filtered
@@ -1660,7 +1662,12 @@ def parse_rss(xml_text: str, source: str, category: str, limit: int = 12) -> lis
         if not title:
             continue
         items.append({
-            "id": f"news-{source}-{abs(hash(link or title))}",
+            # STABLE id (md5 of link/title) — NOT Python's hash() which is
+            # randomized per process. A randomized id meant every server restart
+            # re-assigned ids to the same articles, causing the client to
+            # re-announce already-seen breaking news. md5 is deterministic so an
+            # article keeps the same id forever and is announced exactly once.
+            "id": f"news-{hashlib.md5((link or title).encode('utf-8')).hexdigest()[:16]}",
             "source": source,
             "category": category,
             "title": title[:220],
@@ -2012,10 +2019,11 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/videos/ai"):
             # Topic-filtered to OpenAI/Codex/AI Agents/Hermes/Models/Deepseek family.
-            # 48-hour upstream window (was 24h) so the strict keyword filter still finds
-            # qualifying uploads; client-side rail TTL still gates final display.
+            # 6-hour window — user wants only fresh-for-the-day AI uploads. The
+            # client renders any video within this window (it uses a 6h TTL for
+            # videos, separate from the 2h news TTL).
             payload = build_videos_payload(
-                AI_YT_CHANNELS, "ai-video", 48 * 60, videos_ai_cache,
+                AI_YT_CHANNELS, "ai-video", 6 * 60, videos_ai_cache,
                 keyword_filter=AI_VIDEO_KEYWORDS,
             )
             body = json.dumps(payload).encode("utf-8")

@@ -40,7 +40,13 @@ const state = {
   popupArmedAt: Date.now() + 60000,
   freshAlertWindowMs: 5 * 60 * 1000,
   seenEventIds: new Set(),
-  seenNewsIds: new Set(),
+  // playedNewsIds: every news id ever announced OR present at first load.
+  // Persisted to localStorage so an article is announced EXACTLY ONCE, ever —
+  // surviving page reloads and server restarts. Loaded at boot (see below).
+  playedNewsIds: new Set(),
+  // announcedNewsIds: subset that actually got the breaking popup → these cards
+  // show a "✓ ANNOUNCED" badge. Also persisted.
+  announcedNewsIds: new Set(),
   freshNewsIds: new Set(),
   breakingTimer: null,
   newsBootstrapped: false,
@@ -191,39 +197,75 @@ function geometryLabelPoint(geometry) {
   };
 }
 
+// Curated "illustrated map" land palette — varied warm/cool greens, teals and
+// sandy tones, picked per-country by a stable hash so the globe looks colorful
+// and hand-drawn rather than a flat single green.
+const LAND_PALETTE = [
+  "#3fa36b", "#4cae7a", "#2f9d77", "#5bb98c", "#6fc295",
+  "#7fb86a", "#9ac56e", "#caa75a", "#d8b863", "#bfa24f",
+  "#3c9a8f", "#48ad9c", "#5ec0ad", "#7a9e57", "#a7c36b",
+  "#c98f52", "#b9794a", "#8fb46a", "#62b07f", "#7cc0a0",
+];
+
+function hashString(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h);
+}
+
 function makeGlobeTexture(countries = null) {
   const canvas = document.createElement("canvas");
   canvas.width = 4096;
   canvas.height = 2048;
   const ctx = canvas.getContext("2d");
+
+  // Rich illustrated ocean — deep navy at the poles, brighter teal-blue at the
+  // equator, for a vibrant "painted map" feel.
   const ocean = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  ocean.addColorStop(0, "#081e2e");
-  ocean.addColorStop(0.52, "#0a1f2a");
-  ocean.addColorStop(1, "#040d18");
+  ocean.addColorStop(0.0, "#0a2c4a");
+  ocean.addColorStop(0.30, "#11457a");
+  ocean.addColorStop(0.50, "#1763a8");
+  ocean.addColorStop(0.70, "#11457a");
+  ocean.addColorStop(1.0, "#0a2c4a");
   ctx.fillStyle = ocean;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Grid
-  ctx.strokeStyle = "rgba(120, 170, 200, 0.10)";
-  ctx.lineWidth = 1.5;
-  for (let x = 0; x <= canvas.width; x += canvas.width / 36) {
+  // Subtle ocean sparkle / depth speckles
+  ctx.fillStyle = "rgba(150, 205, 235, 0.05)";
+  for (let i = 0; i < 1400; i++) {
+    const x = Math.random() * canvas.width;
+    const y = Math.random() * canvas.height;
     ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, canvas.height);
-    ctx.stroke();
+    ctx.arc(x, y, Math.random() * 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Faint lat/long grid
+  ctx.strokeStyle = "rgba(170, 210, 235, 0.07)";
+  ctx.lineWidth = 1.2;
+  for (let x = 0; x <= canvas.width; x += canvas.width / 36) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
   }
   for (let y = 0; y <= canvas.height; y += canvas.height / 24) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(canvas.width, y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
   }
 
   if (countries?.features?.length) {
-    ctx.fillStyle = "rgba(30, 86, 70, 0.92)";
-    ctx.strokeStyle = "rgba(199, 237, 225, 0.42)";
-    ctx.lineWidth = 2;
+    // Soft drop-shadow under each landmass for an illustrated "lifted" look
     countries.features.forEach((feature) => {
+      const name = feature.properties?.name || "";
+      const baseColor = LAND_PALETTE[hashString(name) % LAND_PALETTE.length];
+
+      // Shadow pass
+      ctx.save();
+      ctx.shadowColor = "rgba(2, 12, 22, 0.5)";
+      ctx.shadowBlur = 10;
+      ctx.shadowOffsetX = 3;
+      ctx.shadowOffsetY = 4;
+      ctx.fillStyle = baseColor;
       forEachRingCoordinates(feature.geometry, (ring) => {
         ctx.beginPath();
         ring.forEach(([lon, lat], index) => {
@@ -234,53 +276,82 @@ function makeGlobeTexture(countries = null) {
         ctx.closePath();
         ctx.fill();
       });
+      ctx.restore();
     });
 
-    ctx.strokeStyle = "rgba(180, 230, 240, 0.55)";
-    ctx.lineWidth = 1.4;
+    // Bright coastline stroke
+    ctx.strokeStyle = "rgba(235, 250, 245, 0.5)";
+    ctx.lineWidth = 1.6;
     countries.features.forEach((feature) => {
       forEachRingCoordinates(feature.geometry, (ring) => drawRing(ctx, ring, canvas.width, canvas.height));
     });
 
-    ctx.font = "700 26px Inter, Arial, sans-serif";
+    // Soft terrain texture: scatter lighter/darker dabs ONLY over land by
+    // clipping to each country path
+    countries.features.forEach((feature) => {
+      const name = feature.properties?.name || "";
+      const point = geometryLabelPoint(feature.geometry);
+      if (!point) return;
+      ctx.save();
+      ctx.beginPath();
+      forEachRingCoordinates(feature.geometry, (ring) => {
+        ring.forEach(([lon, lat], index) => {
+          const [x, y] = projectionPoint(lon, lat, canvas.width, canvas.height);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.closePath();
+      });
+      ctx.clip();
+      const [cx, cy] = projectionPoint(point.lon, point.lat, canvas.width, canvas.height);
+      const spread = Math.max(40, point.span * 22);
+      const dabs = Math.min(140, Math.max(20, Math.floor(point.span * 6)));
+      for (let i = 0; i < dabs; i++) {
+        const dx = cx + (Math.random() - 0.5) * spread * 2;
+        const dy = cy + (Math.random() - 0.5) * spread;
+        const light = Math.random() > 0.5;
+        ctx.fillStyle = light ? "rgba(255, 255, 240, 0.10)" : "rgba(20, 50, 35, 0.12)";
+        ctx.beginPath();
+        ctx.arc(dx, dy, 4 + Math.random() * 10, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    });
+
+    // Country labels (only larger countries)
+    ctx.font = "700 24px Inter, Arial, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillStyle = "rgba(220, 245, 245, 0.78)";
-    ctx.strokeStyle = "rgba(4, 11, 15, 0.92)";
-    ctx.lineWidth = 5;
+    ctx.fillStyle = "rgba(250, 255, 252, 0.85)";
+    ctx.strokeStyle = "rgba(4, 14, 20, 0.78)";
+    ctx.lineWidth = 4.5;
     countries.features.forEach((feature) => {
       const point = geometryLabelPoint(feature.geometry);
       const name = feature.properties?.name;
-      if (!point || !name || point.span < 8) return;
+      if (!point || !name || point.span < 9) return;
       const [x, y] = projectionPoint(point.lon, point.lat, canvas.width, canvas.height);
       ctx.strokeText(name, x, y);
       ctx.fillText(name, x, y);
     });
   }
 
-  ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
-  for (let i = 0; i < 600; i++) {
-    const x = Math.random() * canvas.width;
-    const y = Math.random() * canvas.height;
-    const r = Math.random() * 1.3;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
   return texture;
 }
 
 const earth = new THREE.Mesh(
-  new THREE.SphereGeometry(2, 96, 96),
+  new THREE.SphereGeometry(2, 128, 128),
   new THREE.MeshStandardMaterial({
     map: makeGlobeTexture(),
-    roughness: 0.86,
-    metalness: 0.08,
-    emissive: new THREE.Color(0x05101a),
-    emissiveIntensity: 0.42,
+    // Use the map itself as emissive so the colorful land stays visible on the
+    // night side too — the globe reads as a solid, illustrated sphere.
+    emissiveMap: null,
+    roughness: 0.92,
+    metalness: 0.04,
+    emissive: new THREE.Color(0x0b2138),
+    emissiveIntensity: 0.32,
   }),
 );
 globeGroup.add(earth);
@@ -290,7 +361,13 @@ async function loadCountryTexture() {
     const response = await fetch(`countries.geojson?ts=${Date.now()}`);
     if (!response.ok) throw new Error("country geometry unavailable");
     const countries = await response.json();
-    earth.material.map = makeGlobeTexture(countries);
+    const tex = makeGlobeTexture(countries);
+    earth.material.map = tex;
+    // Same texture as a dim emissive map so the illustrated land stays readable
+    // on the shadowed hemisphere — keeps the sphere feeling solid + colorful.
+    earth.material.emissiveMap = tex;
+    earth.material.emissive = new THREE.Color(0xffffff);
+    earth.material.emissiveIntensity = 0.22;
     earth.material.needsUpdate = true;
   } catch (error) {
     console.warn(error.message);
@@ -298,8 +375,8 @@ async function loadCountryTexture() {
 }
 
 const atmosphere = new THREE.Mesh(
-  new THREE.SphereGeometry(2.05, 96, 96),
-  new THREE.MeshBasicMaterial({ color: 0x43e8d8, transparent: true, opacity: 0.09, side: THREE.BackSide }),
+  new THREE.SphereGeometry(2.06, 96, 96),
+  new THREE.MeshBasicMaterial({ color: 0x5ab0ff, transparent: true, opacity: 0.10, side: THREE.BackSide }),
 );
 globeGroup.add(atmosphere);
 
@@ -931,11 +1008,13 @@ function createMarker(event) {
     new THREE.SpriteMaterial({
       map: iconTexture(iconKey, event.layer),
       transparent: true,
-      depthTest: false,
-      depthWrite: false,
+      depthTest: true,    // respect the opaque globe → back-side markers are hidden
+      depthWrite: false,  // but don't occlude each other harshly
     }),
   );
-  const iconSize = event.layer === "aircraft" ? 0.072 : event.layer === "satellite" ? 0.062 : event.layer === "camera" ? 0.074 : 0.078;
+  // Base screen-space size. SMALLER than before, and held CONSTANT on screen
+  // regardless of zoom by the per-frame distance correction in animate().
+  const iconSize = event.layer === "aircraft" ? 0.040 : event.layer === "satellite" ? 0.038 : event.layer === "camera" ? 0.044 : 0.046;
   icon.scale.set(iconSize, iconSize, 1);
   icon.userData.eventId = event.id;
   group.add(icon);
@@ -947,18 +1026,18 @@ function createMarker(event) {
         new THREE.SpriteMaterial({
           map: callsignLabelTexture(callsign),
           transparent: true,
-          depthTest: false,
+          depthTest: true,
           depthWrite: false,
         }),
       );
-      label.scale.set(0.11, 0.028, 1);
-      label.position.set(0, -0.05, 0);
+      label.scale.set(0.072, 0.018, 1);
+      label.position.set(0, -0.038, 0);
       label.userData.eventId = event.id;
       group.add(label);
     }
   }
 
-  group.userData = { event, marker: icon, baseScale: event.severity === "high" ? 1.15 : 1 };
+  group.userData = { event, marker: icon, baseScale: event.severity === "high" ? 1.18 : 1 };
   markerGroup.add(group);
   state.markers.set(event.id, group);
   state.markerObjects.push(icon);
@@ -1145,13 +1224,18 @@ function newsCardHtml(item) {
   const thumb = item.thumbnail
     ? `<div class="news-card-thumb"><img src="${item.thumbnail}" alt="" loading="lazy" onerror="this.parentNode.parentNode.classList.add('no-image'); this.parentNode.remove();"></div>`
     : "";
+  // ✓ badge if this story was already announced as breaking (so the operator
+  // can see the system tracked it and won't re-announce it).
+  const announced = state.announcedNewsIds.has(item.id)
+    ? `<span class="news-played" title="Announced — won't repeat">✓</span>`
+    : "";
   return `
     <a class="news-card cat-${item.category || "world"} ${noImage} ${isNew}" data-news-card="true" data-url="${item.url || ""}" data-source="${(item.source || "").replace(/"/g, "&quot;")}" data-title="${(item.title || "").replace(/"/g, "&quot;")}" href="${item.url || "#"}" target="_blank" rel="noreferrer">
       ${thumb}
       <div class="news-card-body">
         <div class="news-card-meta">
           <span>${item.source}</span>
-          <span class="news-time">${relativeTime(item.time)}</span>
+          <span class="news-time">${announced}${relativeTime(item.time)}</span>
         </div>
         <h3>${item.title}</h3>
         <p>${item.summary || ""}</p>
@@ -1160,13 +1244,17 @@ function newsCardHtml(item) {
   `;
 }
 
-const CARD_MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2-hour rail TTL
+const CARD_MAX_AGE_MS = 2 * 60 * 60 * 1000;       // news: 2-hour rail TTL
+const VIDEO_MAX_AGE_MS = 6 * 60 * 60 * 1000;      // videos: 6-hour TTL (fresh-for-the-day)
 
 function isFresh(item) {
   if (!item || !item.time) return false;
   const ts = eventTimestamp(item.time);
   if (!ts) return false;
-  return Date.now() - ts < CARD_MAX_AGE_MS;
+  // YouTube AI / POE2 video cards get a longer 6-hour window so AI uploads
+  // (which are less frequent than news) actually have time to appear.
+  const maxAge = item._isVideo ? VIDEO_MAX_AGE_MS : CARD_MAX_AGE_MS;
+  return Date.now() - ts < maxAge;
 }
 
 // Signature of the currently rendered rail so we can skip pointless rebuilds
@@ -1190,17 +1278,17 @@ function renderNews() {
   if (!merged.length) {
     const emptySig = "EMPTY";
     if (renderedNewsSignature !== emptySig) {
-      els.newsTrack.innerHTML = `<div class="rail-empty"><strong>Quiet window</strong>No news, AI uploads, or POE2 videos in the last 2 hours — polling continues every 25s for news, 15 min for videos.</div>`;
+      els.newsTrack.innerHTML = `<div class="rail-empty"><strong>Quiet window</strong>No fresh news (2h) or AI / POE2 videos (6h) right now — polling continues every 25s for news, 15 min for videos.</div>`;
       renderedNewsSignature = emptySig;
     }
-    els.newsMeta.textContent = `0 items · 2h window`;
+    els.newsMeta.textContent = `0 items`;
     return;
   }
   const aiNewsCount = merged.filter((i) => !i._isVideo && i.category === "ai").length;
   const aiVideoCount = merged.filter((i) => i._isVideo && i.category === "ai-video").length;
   const gameCount = merged.filter((i) => i._isVideo && i.category === "gaming-video").length;
   const totalNews = merged.filter((i) => !i._isVideo).length;
-  els.newsMeta.textContent = `${totalNews} stories · ${aiNewsCount + aiVideoCount} AI · ${gameCount} POE2 · 2h window`;
+  els.newsMeta.textContent = `${totalNews} stories · ${aiNewsCount + aiVideoCount} AI · ${gameCount} POE2`;
   els.newsTelemetry.textContent = `${merged.length} items`;
 
   // Signature: list of item IDs (rounded to nearest minute so "3m ago" → "4m ago"
@@ -1284,21 +1372,67 @@ function visibleNewsFromRaw() {
   return state.rawNews.filter((item) => !pendingIds.has(item.id));
 }
 
+// --- Persistent "already played" tracking (localStorage) ---
+const PLAYED_NEWS_KEY = "matrix.playedNewsIds";
+const ANNOUNCED_NEWS_KEY = "matrix.announcedNewsIds";
+const PLAYED_NEWS_MAX = 3000; // cap so storage never grows unbounded
+
+function loadPlayedNews() {
+  try {
+    const played = JSON.parse(localStorage.getItem(PLAYED_NEWS_KEY) || "[]");
+    const announced = JSON.parse(localStorage.getItem(ANNOUNCED_NEWS_KEY) || "[]");
+    state.playedNewsIds = new Set(Array.isArray(played) ? played : []);
+    state.announcedNewsIds = new Set(Array.isArray(announced) ? announced : []);
+  } catch (_) {
+    state.playedNewsIds = new Set();
+    state.announcedNewsIds = new Set();
+  }
+}
+
+function persistPlayedNews() {
+  try {
+    // Keep only the most-recent PLAYED_NEWS_MAX ids (Sets preserve insertion order)
+    let played = [...state.playedNewsIds];
+    if (played.length > PLAYED_NEWS_MAX) {
+      played = played.slice(played.length - PLAYED_NEWS_MAX);
+      state.playedNewsIds = new Set(played);
+    }
+    let announced = [...state.announcedNewsIds];
+    if (announced.length > PLAYED_NEWS_MAX) {
+      announced = announced.slice(announced.length - PLAYED_NEWS_MAX);
+      state.announcedNewsIds = new Set(announced);
+    }
+    localStorage.setItem(PLAYED_NEWS_KEY, JSON.stringify(played));
+    localStorage.setItem(ANNOUNCED_NEWS_KEY, JSON.stringify(announced));
+  } catch (_) { /* storage full / disabled — degrade gracefully */ }
+}
+
+loadPlayedNews();
+
 function detectBreakingNews(items) {
   if (!items) return;
   state.rawNews = items;
   const isFirstLoad = !state.newsBootstrapped;
-  const incoming = items.filter((item) => !state.seenNewsIds.has(item.id));
-  items.forEach((item) => state.seenNewsIds.add(item.id));
 
   if (isFirstLoad) {
+    // First poll of this page-load: everything currently in the feed is "old
+    // news" for this viewer — mark all as played (so a later reload won't
+    // re-announce them) but DON'T pop anything.
     state.newsBootstrapped = true;
+    items.forEach((item) => state.playedNewsIds.add(item.id));
+    persistPlayedNews();
     state.news = items;
     return;
   }
 
+  // Subsequent polls: an item is "breaking" ONLY if its stable id has NEVER
+  // been played before (this page-load or any previous one).
+  const incoming = items.filter((item) => !state.playedNewsIds.has(item.id));
   if (incoming.length) {
-    // Hold new items in the queue so they don't appear in the rail yet
+    // Mark played immediately at queue-time so even if the tab closes before
+    // the popup shows, it can never re-announce on the next load.
+    incoming.forEach((item) => state.playedNewsIds.add(item.id));
+    persistPlayedNews();
     state.pendingNews.push(...incoming);
   }
   state.news = visibleNewsFromRaw();
@@ -1311,6 +1445,9 @@ function showNextBreakingPopup() {
   if (!state.pendingNews.length) return;
 
   const item = state.pendingNews[0]; // peek; promoted on dismiss
+  // Record that this item actually got the breaking treatment → ✓ badge on its card
+  state.announcedNewsIds.add(item.id);
+  persistPlayedNews();
   els.breakingPopup.innerHTML = `
     <div class="breaking-head">
       <span class="breaking-tag">BREAKING</span>
@@ -2153,10 +2290,18 @@ function animate(time) {
   }
   markerGroup.rotation.y = globeGroup.rotation.y;
 
+  // Constant on-screen icon size regardless of zoom.
+  // A sprite of fixed WORLD size grows on screen as the camera approaches
+  // (screen_size ∝ world_size / distance). To hold screen_size constant we
+  // scale the marker proportional to the camera→origin distance, so
+  // world_size/distance stays fixed. REF is the default camera distance.
+  const REF_CAM_DISTANCE = 5.8;
+  const zoomScale = camera.position.length() / REF_CAM_DISTANCE;
+
   for (const marker of state.markers.values()) {
     const isFlashing = marker.userData.flashUntil && marker.userData.flashUntil > time;
-    const pulse = 1 + Math.sin(time * 0.008) * (isFlashing ? 0.24 : 0.04);
-    marker.scale.setScalar(marker.userData.baseScale * pulse);
+    const pulse = 1 + Math.sin(time * 0.008) * (isFlashing ? 0.22 : 0.03);
+    marker.scale.setScalar(marker.userData.baseScale * pulse * zoomScale);
   }
 
   controls.update();

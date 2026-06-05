@@ -1480,6 +1480,23 @@ h1 {
   color: var(--muted);
 }
 
+/* ✓ badge shown on cards already announced as breaking news (play-once proof) */
+.news-played {
+  display: inline-grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  margin-right: 5px;
+  border-radius: 999px;
+  background: var(--good);
+  color: #04141a;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  vertical-align: middle;
+  box-shadow: 0 0 6px rgba(77, 242, 200, 0.5);
+}
+
 .news-card h3 {
   margin: 0;
   font-size: 1rem;
