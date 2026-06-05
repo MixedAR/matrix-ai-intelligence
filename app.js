@@ -588,17 +588,31 @@ function dropNewsFlag(item, isEmergency = false) {
   const poleLen = 0.34;
   // Pole
   const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.005, 0.007, poleLen, 8),
+    new THREE.CylinderGeometry(0.005, 0.008, poleLen, 8),
     new THREE.MeshBasicMaterial({ color: 0xeaf2ff, depthTest: true }),
   );
   pole.position.y = poleLen / 2;
+  pole.material.userData.baseOpacity = 1.0;
   group.add(pole);
-  // Base bead at the surface
+  // Base bead at the surface (pulses)
   const bead = new THREE.Mesh(
-    new THREE.SphereGeometry(0.018, 12, 12),
+    new THREE.SphereGeometry(0.022, 14, 14),
     new THREE.MeshBasicMaterial({ color: accent, depthTest: true }),
   );
+  bead.material.userData.baseOpacity = 1.0;
   group.add(bead);
+  // Tall glowing beacon beam so the flag is spottable from a distance / an angle
+  const beacon = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.006, 0.006, 0.9, 8, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: accent, transparent: true, opacity: 0.32,
+      depthTest: true, depthWrite: false, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  beacon.position.y = 0.45;
+  beacon.material.userData.baseOpacity = 0.32;
+  group.add(beacon);
   // Banner sprite at the top of the pole (billboards toward camera)
   const banner = new THREE.Sprite(
     new THREE.SpriteMaterial({
@@ -608,19 +622,20 @@ function dropNewsFlag(item, isEmergency = false) {
       depthWrite: false,
     }),
   );
-  banner.scale.set(0.5, 0.215, 1);
-  banner.position.set(0.27, poleLen - 0.02, 0); // beside the pole top like a flag
+  banner.scale.set(0.56, 0.24, 1);
+  banner.position.set(0.30, poleLen - 0.01, 0); // beside the pole top like a flag
   group.add(banner);
 
   newsFlagGroup.add(group);
   const entry = {
-    group,
+    group, bead,
     until: performance.now() + NEWS_FLAG_TTL_MS,
     raisedAt: performance.now(),
     dispose() {
       newsFlagGroup.remove(group);
       pole.geometry.dispose(); pole.material.dispose();
       bead.geometry.dispose(); bead.material.dispose();
+      beacon.geometry.dispose(); beacon.material.dispose();
       banner.material.dispose();
     },
   };
@@ -630,6 +645,22 @@ function dropNewsFlag(item, isEmergency = false) {
     const old = newsFlags.shift();
     old.dispose();
   }
+  // Spin the globe so the new flag faces the viewer — the whole point is that
+  // the operator SEES it arrive.
+  focusGlobeOnLatLon(lat, lon);
+}
+
+// Rotate the globe (about Y) so a given lat/lon faces the camera, and pause
+// auto-rotation for a few seconds so the operator can read the flag.
+function focusGlobeOnLatLon(lat, lon) {
+  const P = latLngToVector3(lat, lon, 2.0);
+  const camAz = Math.atan2(camera.position.x, camera.position.z);
+  const beta = Math.atan2(P.x, P.z);
+  state.rotFocus = {
+    target: camAz - beta,
+    animating: true,
+    resumeAutoAt: performance.now() + 9000,
+  };
 }
 
 function colorForLayer(layerId) {
@@ -1491,13 +1522,13 @@ let renderedNewsSignature = "";
 
 function renderNews() {
   if (!els.newsTrack) return;
-  if (els.railTitle) els.railTitle.textContent = "Breaking Newswire";
+  if (els.railTitle) els.railTitle.textContent = "AI Newswire";
 
-  // Single merged feed: news + AI videos + POE2 videos, all in last 2h, newest first
+  // Single merged feed: AI news + emergency news + AI videos (NO POE2/gaming).
+  // News uses a 2h window; AI videos use a 6h window (see isFresh).
   const merged = [
     ...state.news,
     ...state.aiVideos.map((v) => ({ ...v, _isVideo: true })),
-    ...state.gamingVideos.map((v) => ({ ...v, _isVideo: true })),
   ]
     .filter((i) => i && i.title && isFresh(i))
     .sort((a, b) => eventTimestamp(b.time) - eventTimestamp(a.time));
@@ -1505,17 +1536,17 @@ function renderNews() {
   if (!merged.length) {
     const emptySig = "EMPTY";
     if (renderedNewsSignature !== emptySig) {
-      els.newsTrack.innerHTML = `<div class="rail-empty"><strong>Quiet window</strong>No fresh news (2h) or AI / POE2 videos (6h) right now — polling continues every 25s for news, 15 min for videos.</div>`;
+      els.newsTrack.innerHTML = `<div class="rail-empty"><strong>Quiet window</strong>No fresh AI news (2h) or AI videos (6h) right now — polling continues every 25s for news, 15 min for videos.</div>`;
       renderedNewsSignature = emptySig;
     }
     els.newsMeta.textContent = `0 items`;
     return;
   }
   const aiNewsCount = merged.filter((i) => !i._isVideo && i.category === "ai").length;
-  const aiVideoCount = merged.filter((i) => i._isVideo && i.category === "ai-video").length;
-  const gameCount = merged.filter((i) => i._isVideo && i.category === "gaming-video").length;
+  const emergencyCount = merged.filter((i) => !i._isVideo && i.category === "emergency").length;
+  const aiVideoCount = merged.filter((i) => i._isVideo).length;
   const totalNews = merged.filter((i) => !i._isVideo).length;
-  els.newsMeta.textContent = `${totalNews} stories · ${aiNewsCount + aiVideoCount} AI · ${gameCount} POE2`;
+  els.newsMeta.textContent = `${aiNewsCount} AI · ${aiVideoCount} AI video · ${emergencyCount} emergency`;
   els.newsTelemetry.textContent = `${merged.length} items`;
 
   // Signature: list of item IDs (rounded to nearest minute so "3m ago" → "4m ago"
@@ -1649,11 +1680,20 @@ function detectBreakingNews(items) {
   if (isFirstLoad) {
     // First poll of this page-load: everything currently in the feed is "old
     // news" for this viewer — mark all as played (so a later reload won't
-    // re-announce them) but DON'T pop anything.
+    // re-announce them) but DON'T pop the breaking box.
     state.newsBootstrapped = true;
     items.forEach((item) => state.playedNewsIds.add(item.id));
     persistPlayedNews();
     state.news = items;
+    // BUT do plant a few flags right away so the globe immediately shows AI
+    // news at its locations (the popup box is suppressed on first load; the
+    // flags are not). Stagger them so the focus-spin doesn't whip around.
+    const recentAi = items
+      .filter((i) => i.category === "ai" || i.category === "emergency")
+      .slice(0, 4);
+    recentAi.forEach((item, idx) => {
+      setTimeout(() => dropNewsFlag(item, item.category === "emergency"), idx * 1400);
+    });
     return;
   }
 
@@ -2421,17 +2461,21 @@ async function loadEvents() {
     safeFetch(`/api/news?ts=${Date.now()}`, 12000),
     safeFetch(`/api/intel?ts=${Date.now()}`, 12000),
   ]);
-  if (!response || !response.ok) throw new Error("Live feed request failed");
-  const payload = await response.json();
-  const satellitePayload = satelliteResponse && satelliteResponse.ok ? await satelliteResponse.json() : { satellites: [], sources: [] };
-  const cameraPayload = cameraResponse && cameraResponse.ok ? await cameraResponse.json() : { cameras: [], sources: [] };
+  // Events may fail/timeout on a cold load — degrade gracefully instead of
+  // throwing, so cameras / news / intel still render (cameras-only is the
+  // default view, so cameras must NOT depend on the slow /api/events call).
+  const payload = response && response.ok ? await response.json() : { events: state.baseEvents || [], sources: [] };
+  const satellitePayload = satelliteResponse && satelliteResponse.ok ? await satelliteResponse.json() : { satellites: state.satelliteTles || [], sources: [] };
+  const cameraPayload = cameraResponse && cameraResponse.ok ? await cameraResponse.json() : { cameras: state.cameras || [], sources: [] };
   const newsPayload = newsResponse && newsResponse.ok ? await newsResponse.json() : { items: [], sources: [] };
-  const intelPayload = intelResponse && intelResponse.ok ? await intelResponse.json() : { widgets: [], sources: [] };
-  state.baseEvents = payload.events;
+  const intelPayload = intelResponse && intelResponse.ok ? await intelResponse.json() : { widgets: state.intel || [], sources: [] };
+  state.baseEvents = payload.events || [];
   state.satelliteTles = satellitePayload.satellites ?? [];
   state.cameras = cameraPayload.cameras ?? [];
-  const incomingNews = newsPayload.items ?? [];
-  detectBreakingNews(incomingNews); // sets state.news + state.rawNews internally
+  // Only process news if we actually fetched it (else keep what pollNews has).
+  if (newsResponse && newsResponse.ok) {
+    detectBreakingNews(newsPayload.items ?? []);
+  }
   state.intel = intelPayload.widgets ?? [];
   computeSatelliteEvents();
   state.events = [...state.baseEvents, ...state.satelliteEvents];
@@ -2522,7 +2566,21 @@ function tickClock() {
 
 function animate(time) {
   requestAnimationFrame(animate);
-  if (state.autoRotate) {
+  const nowp = performance.now();
+
+  // Globe rotation: when a news flag drops we focus-spin the globe to face it
+  // (and pause auto-rotate briefly); otherwise auto-rotate as usual.
+  if (state.rotFocus && state.rotFocus.animating) {
+    const cur = globeGroup.rotation.y;
+    let delta = (state.rotFocus.target - cur) % (Math.PI * 2);
+    if (delta > Math.PI) delta -= Math.PI * 2;
+    if (delta < -Math.PI) delta += Math.PI * 2;
+    globeGroup.rotation.y = cur + delta * 0.14;
+    if (Math.abs(delta) < 0.008) {
+      globeGroup.rotation.y = state.rotFocus.target;
+      state.rotFocus.animating = false;
+    }
+  } else if (state.autoRotate && (!state.rotFocus || nowp > state.rotFocus.resumeAutoAt)) {
     globeGroup.rotation.y += 0.0009;
   }
   markerGroup.rotation.y = globeGroup.rotation.y;
@@ -2530,7 +2588,6 @@ function animate(time) {
 
   // Expire + animate AI news flagpoles
   if (newsFlags.length) {
-    const nowp = performance.now();
     for (let i = newsFlags.length - 1; i >= 0; i--) {
       const f = newsFlags[i];
       if (f.until < nowp) {
@@ -2545,11 +2602,18 @@ function animate(time) {
       const fade = Math.min(1, remain / 1200);
       f.group.scale.setScalar(rise);
       f.group.children.forEach((child) => {
-        if (child.material && "opacity" in child.material) {
-          child.material.opacity = fade * (child.isSprite ? 1 : 0.95);
+        if (child.material && "opacity" in child.material && !child.isSprite) {
+          child.material.opacity = fade * (child.material.userData?.baseOpacity ?? 0.95);
           child.material.transparent = true;
+        } else if (child.isSprite) {
+          child.material.opacity = fade;
         }
       });
+      // Pulse the base bead like a beacon
+      if (f.bead) {
+        const p = 1 + Math.sin(nowp * 0.012) * 0.35;
+        f.bead.scale.setScalar(p);
+      }
     }
   }
 
@@ -2761,17 +2825,12 @@ function bindControls() {
 }
 
 /* Dedicated YouTube video poller (every 15 min).
- * Pulls AI clips from the last 60 min and gaming clips from the last 120 min.
+ * AI clips ONLY — POE2 / gaming has been removed entirely.
  * Flags any never-seen video IDs as "fresh" so they slide in with the
  * is-new flash + JUST IN badge. */
 async function pollYouTubeVideos(opts = {}) {
   try {
-    const [aiRes, gameRes] = await Promise.all([
-      fetch(`/api/videos/ai?ts=${Date.now()}`),
-      fetch(`/api/videos/gaming?ts=${Date.now()}`),
-    ]);
-    let renderedAny = false;
-    let firedVideoSound = false;
+    const aiRes = await fetch(`/api/videos/ai?ts=${Date.now()}`);
     if (aiRes.ok) {
       const payload = await aiRes.json();
       const incoming = payload.items ?? [];
@@ -2781,34 +2840,15 @@ async function pollYouTubeVideos(opts = {}) {
       incoming.forEach((v) => state.seenVideoIds.add(v.id));
       if (newIds.size > 0) {
         state.freshVideoIds = new Set([...state.freshVideoIds, ...newIds]);
-        if (!firedVideoSound) { playAlertSound("video"); firedVideoSound = true; }
+        playAlertSound("video");
         setTimeout(() => {
           newIds.forEach((id) => state.freshVideoIds.delete(id));
           renderNews();
         }, 6000);
       }
       state.aiVideos = incoming;
-      renderedAny = true;
+      renderNews();
     }
-    if (gameRes.ok) {
-      const payload = await gameRes.json();
-      const incoming = payload.items ?? [];
-      const newIds = opts.bootstrap
-        ? new Set()
-        : new Set(incoming.filter((v) => !state.seenVideoIds.has(v.id)).map((v) => v.id));
-      incoming.forEach((v) => state.seenVideoIds.add(v.id));
-      if (newIds.size > 0) {
-        state.freshVideoIds = new Set([...state.freshVideoIds, ...newIds]);
-        if (!firedVideoSound) { playAlertSound("video"); firedVideoSound = true; }
-        setTimeout(() => {
-          newIds.forEach((id) => state.freshVideoIds.delete(id));
-          renderNews();
-        }, 6000);
-      }
-      state.gamingVideos = incoming;
-      renderedAny = true;
-    }
-    if (renderedAny) renderNews();
   } catch (_) {
     /* ignore transient failures */
   }
