@@ -2840,6 +2840,7 @@ async function pollNews() {
 bindControls();
 resize();
 requestAnimationFrame(animate);
+renderLayers(); // populate the Sources popover immediately (before data loads)
 loadCountryTexture();
 loadEvents().catch((error) => {
   els.feedState.textContent = "Live feeds unavailable";
