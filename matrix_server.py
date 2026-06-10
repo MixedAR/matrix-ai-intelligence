@@ -1966,6 +1966,8 @@ def compact_jarvis_context(context: Any) -> dict[str, Any]:
     if not isinstance(context, dict):
         return {}
     compact: dict[str, Any] = {}
+    if context.get("current_date"):
+        compact["current_date"] = clean_context_text(context.get("current_date"), 80)
     if isinstance(context.get("metrics"), dict):
         compact["metrics"] = {
             clean_context_text(k, 40): clean_context_text(v, 120)
@@ -2028,6 +2030,12 @@ def compact_jarvis_context(context: Any) -> dict[str, Any]:
                 for item in items[:6]
                 if isinstance(item, dict)
             ]
+        if isinstance(live.get("date_signals"), list):
+            compact_live["date_signals"] = [
+                clean_context_text(item, 180)
+                for item in live["date_signals"][:8]
+                if item
+            ]
         if compact_live:
             compact["live_lookup"] = compact_live
     return compact
@@ -2065,9 +2073,11 @@ def fetch_deepseek_jarvis(query: str, context: Any, history: Any = None) -> dict
         raise RuntimeError("DeepSeek API key is not configured")
     compact = compact_jarvis_context(context)
     context_json = json.dumps(compact, ensure_ascii=False)[:15000]
+    today = datetime.now(timezone.utc).strftime("%A, %B %-d, %Y") if os.name != "nt" else datetime.now(timezone.utc).strftime("%A, %B %#d, %Y")
     system_prompt = (
         "You are JARVIS for the Matrix AI Intelligence Desk, adapted from the Mark-XL assistant pattern: "
         "speech or text command in, LLM reasoning, dashboard/tool action, concise spoken answer out. "
+        f"Today's date is {today} UTC. Treat relative dates using this date. "
         "You are a calm, extremely capable UK male intelligence-desk agent. Address the operator as sir occasionally, not every sentence. "
         "Answer the user's actual question first. Use general knowledge when appropriate, and use the provided live dashboard context only when it helps. "
         "Live lookup context, when present, is fresh tool output for current facts, stocks, and news. Use it directly and mention uncertainty when headlines imply causes rather than prove them. "
@@ -2800,6 +2810,59 @@ def fetch_live_news_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
         return []
 
 
+def merge_news_items(*groups: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            key = (item.get("url") or item.get("title") or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def extract_date_signals(items: list[dict[str, Any]]) -> list[str]:
+    signals: list[str] = []
+    patterns = [
+        r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+        r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?\b",
+        r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
+        r"\b\d{1,2}/\d{1,2}/(?:\d{2}|\d{4})\b",
+        r"\b(?:Nasdaq|NYSE|ticker|SPCX|priced?|trading begins|go public|listing)\b",
+    ]
+    for item in items:
+        blob = f"{item.get('title','')} {item.get('summary','')}"
+        found = []
+        for pattern in patterns:
+            found.extend(re.findall(pattern, blob, re.I))
+        if found:
+            source = item.get("source") or "live news"
+            title = clean_context_text(item.get("title"), 110)
+            signals.append(f"{source}: {', '.join(dict.fromkeys(str(x) for x in found[:5]))} — {title}")
+        if len(signals) >= 8:
+            break
+    return signals
+
+
+def jarvis_company_query(query: str) -> tuple[str, str] | None:
+    q = (query or "").lower()
+    if re.search(r"\b(spacex|space\s*x|spaxex|starlink)\b", q):
+        return ("SpaceX", "SpaceX OR Starlink")
+    if re.search(r"\b(openai|chatgpt)\b", q):
+        return ("OpenAI", "OpenAI")
+    if re.search(r"\b(anthropic|claude)\b", q):
+        return ("Anthropic", "Anthropic OR Claude")
+    if re.search(r"\b(nvidia|nvda)\b", q):
+        return ("NVIDIA", "NVIDIA OR NVDA")
+    if re.search(r"\b(tesla|tsla)\b", q):
+        return ("Tesla", "Tesla OR TSLA")
+    return None
+
+
 def jarvis_market_symbol(query: str) -> tuple[str, str] | None:
     q = (query or "").lower()
     if re.search(r"\b(tsla|tesla)\b", q):
@@ -2811,16 +2874,40 @@ def build_jarvis_live_lookup(query: str) -> dict[str, Any]:
     q = query or ""
     lookup: dict[str, Any] = {}
     market = jarvis_market_symbol(q)
+    company = jarvis_company_query(q)
     if market and re.search(r"\b(stock|share|shares|price|market|drop|dropped|down|fall|fell|rally|up|why)\b", q, re.I):
         symbol, company = market
         if symbol == "TSLA":
             lookup["stock"] = build_stock_payload()
         lookup["market_news"] = fetch_stock_news(symbol, company)
-    if re.search(r"\b(today|current|currently|latest|recent|now|why|what happened|worldwide|search|look up|news)\b", q, re.I):
+    live_intent = re.search(
+        r"\b(today|current|currently|latest|recent|now|why|what happened|worldwide|search|look up|news|"
+        r"when|date|timeline|schedule|scheduled|happening|ipo|listing|go public|public offering|"
+        r"price|priced|valuation|ticker|nasdaq|nyse|sec|filed|filing)\b",
+        q,
+        re.I,
+    )
+    if live_intent:
         search_query = q
         if market:
             search_query = f"{market[1]} stock why today"
+        elif company and re.search(r"\b(ipo|listing|go public|public offering|ticker|nasdaq|nyse|sec|filed|filing|when|date|timeline)\b", q, re.I):
+            search_query = f"{company[1]} IPO listing date latest"
+            targeted = [
+                fetch_live_news_search(f"{company[0]} IPO June 12 2026", 6),
+                fetch_live_news_search(f"{company[0]} IPO trading begins June 12 Nasdaq", 6),
+                fetch_live_news_search(search_query, 6),
+            ]
+            lookup["news_search"] = merge_news_items(*targeted, limit=10)
+            lookup["date_signals"] = extract_date_signals(lookup["news_search"])
+            lookup["current_date"] = datetime.now(timezone.utc).isoformat()
+            return lookup
+        elif company:
+            search_query = f"{company[1]} latest news"
         lookup["news_search"] = fetch_live_news_search(search_query)
+        lookup["date_signals"] = extract_date_signals(lookup["news_search"])
+    if lookup:
+        lookup["current_date"] = datetime.now(timezone.utc).isoformat()
     return lookup
 
 
