@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -33,7 +33,13 @@ news_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 intel_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 videos_ai_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 videos_gaming_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+stock_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+social_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+aipulse_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 VIDEOS_CACHE_TTL_SECONDS = 300  # 5 minute server cache (client polls every 15 min)
+STOCK_CACHE_TTL_SECONDS = 60
+SOCIAL_CACHE_TTL_SECONDS = 120
+AIPULSE_CACHE_TTL_SECONDS = 600
 SATELLITE_IDS = [
     25544, 20580, 25338, 28654, 33591, 25994, 27424, 37849, 43013, 54234,
     39084, 49260, 40697, 42063, 39634, 38771, 43689, 36516, 41866, 41867,
@@ -1884,6 +1890,204 @@ def build_intel_payload() -> dict[str, Any]:
     return payload
 
 
+def build_stock_payload() -> dict[str, Any]:
+    """Live TSLA quote + intraday 5-minute chart via Yahoo Finance's public
+    chart endpoint (free, no key). 60s cache."""
+    now = time.time()
+    if stock_cache["payload"] and now - stock_cache["at"] < STOCK_CACHE_TTL_SECONDS:
+        return stock_cache["payload"]
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/TSLA?interval=5m&range=1d"
+    try:
+        data = json.loads(fetch_text(url, timeout=8))
+        result = data["chart"]["result"][0]
+        meta = result.get("meta", {})
+        timestamps = result.get("timestamp") or []
+        closes = (result.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
+        points = [
+            {"t": t, "c": round(c, 2)}
+            for t, c in zip(timestamps, closes)
+            if c is not None
+        ]
+        price = meta.get("regularMarketPrice")
+        prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+        change = round(price - prev, 2) if price is not None and prev else None
+        change_pct = round(change / prev * 100, 2) if change is not None and prev else None
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": "TSLA",
+            "name": meta.get("shortName") or "Tesla, Inc.",
+            "price": price,
+            "prevClose": prev,
+            "change": change,
+            "changePct": change_pct,
+            "currency": meta.get("currency") or "USD",
+            "marketState": meta.get("marketState"),
+            "dayHigh": meta.get("regularMarketDayHigh"),
+            "dayLow": meta.get("regularMarketDayLow"),
+            "points": points[-80:],
+        }
+    except Exception as exc:
+        # Keep serving the last good payload if Yahoo hiccups
+        if stock_cache["payload"]:
+            return stock_cache["payload"]
+        payload = {"updated_at": datetime.now(timezone.utc).isoformat(), "symbol": "TSLA", "error": str(exc), "points": []}
+    stock_cache["at"] = now
+    stock_cache["payload"] = payload
+    return payload
+
+
+def build_social_payload() -> dict[str, Any]:
+    """Live AI social pulse from free, key-less networks:
+    Mastodon hashtag timelines + Lemmy communities + Hacker News (Algolia,
+    by-date). Reddit/Bluesky/X block anonymous server access, so these three
+    give the live 'people are posting right now' signal."""
+    now = time.time()
+    if social_cache["payload"] and now - social_cache["at"] < SOCIAL_CACHE_TTL_SECONDS:
+        return social_cache["payload"]
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    # Mastodon — hashtag timelines (multiple AI tags)
+    for tag in ("openai", "artificialintelligence", "chatgpt", "llm"):
+        try:
+            posts = json.loads(fetch_text(f"https://mastodon.social/api/v1/timelines/tag/{tag}?limit=10", timeout=7))
+            for p in posts:
+                text = strip_html(p.get("content") or "")
+                if len(text) < 30:
+                    continue
+                items.append({
+                    "id": f"mast-{p.get('id')}",
+                    "network": "mastodon",
+                    "author": "@" + (p.get("account", {}).get("acct") or "user"),
+                    "text": text[:300],
+                    "url": p.get("url") or "",
+                    "score": (p.get("favourites_count") or 0) + (p.get("reblogs_count") or 0),
+                    "time": p.get("created_at"),
+                })
+        except Exception as exc:
+            errors.append(f"mastodon/{tag}: {exc}")
+
+    # Lemmy — Reddit-style communities
+    try:
+        data = json.loads(fetch_text("https://lemmy.world/api/v3/post/list?community_name=technology&sort=Hot&limit=15", timeout=8))
+        for p in data.get("posts", []):
+            post = p.get("post", {})
+            counts = p.get("counts", {})
+            title = post.get("name") or ""
+            blob = f"{title} {post.get('body','')}".lower()
+            # Keep AI-relevant tech posts only
+            if not re.search(r"\b(ai|artificial intelligence|openai|chatgpt|llm|anthropic|claude|gemini|deepseek|nvidia|robot|model)\b", blob):
+                continue
+            items.append({
+                "id": f"lemmy-{post.get('id')}",
+                "network": "lemmy",
+                "author": "c/technology",
+                "text": title[:300],
+                "url": post.get("ap_id") or "",
+                "score": counts.get("score") or 0,
+                "time": post.get("published"),
+            })
+    except Exception as exc:
+        errors.append(f"lemmy: {exc}")
+
+    # Hacker News — newest AI stories (Algolia)
+    try:
+        data = json.loads(fetch_text("https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=15", timeout=8))
+        for h in data.get("hits", []):
+            title = h.get("title") or ""
+            if not title:
+                continue
+            items.append({
+                "id": f"hn-{h.get('objectID')}",
+                "network": "hn",
+                "author": "@" + (h.get("author") or "hn"),
+                "text": title[:300],
+                "url": h.get("url") or f"https://news.ycombinator.com/item?id={h.get('objectID')}",
+                "score": h.get("points") or 0,
+                "time": h.get("created_at"),
+            })
+    except Exception as exc:
+        errors.append(f"hn-algolia: {exc}")
+
+    items.sort(key=lambda i: i.get("time") or "", reverse=True)
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "errors": errors,
+        "items": items[:40],
+    }
+    social_cache["at"] = now
+    social_cache["payload"] = payload
+    return payload
+
+
+def build_aipulse_payload() -> dict[str, Any]:
+    """The 'crazy density' AI research pulse: latest arXiv cs.AI papers,
+    Hugging Face trending models, and fresh-this-week GitHub AI repos."""
+    now = time.time()
+    if aipulse_cache["payload"] and now - aipulse_cache["at"] < AIPULSE_CACHE_TTL_SECONDS:
+        return aipulse_cache["payload"]
+    papers: list[dict[str, Any]] = []
+    models: list[dict[str, Any]] = []
+    repos: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    try:
+        xml_text = fetch_text(
+            "https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=8",
+            timeout=10,
+        )
+        root = ET.fromstring(xml_text)
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        for e in root.findall("a:entry", ns):
+            title = re.sub(r"\s+", " ", (e.findtext("a:title", "", ns) or "")).strip()
+            link = e.findtext("a:id", "", ns) or ""
+            published = e.findtext("a:published", "", ns) or ""
+            authors = [a.findtext("a:name", "", ns) for a in e.findall("a:author", ns)][:3]
+            papers.append({"title": title[:160], "url": link, "time": published, "authors": ", ".join(filter(None, authors))})
+    except Exception as exc:
+        errors.append(f"arxiv: {exc}")
+
+    try:
+        data = json.loads(fetch_text("https://huggingface.co/api/models?sort=trendingScore&limit=8", timeout=8))
+        for m in data:
+            models.append({
+                "id": m.get("id"),
+                "likes": m.get("likes"),
+                "downloads": m.get("downloads"),
+                "task": m.get("pipeline_tag") or "",
+                "url": f"https://huggingface.co/{m.get('id')}",
+            })
+    except Exception as exc:
+        errors.append(f"huggingface: {exc}")
+
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
+        data = json.loads(fetch_text(
+            f"https://api.github.com/search/repositories?q=topic:ai+created:>{since}&sort=stars&order=desc&per_page=6",
+            timeout=8,
+        ))
+        for r in data.get("items", []):
+            repos.append({
+                "name": r.get("full_name"),
+                "stars": r.get("stargazers_count"),
+                "desc": (r.get("description") or "")[:120],
+                "url": r.get("html_url"),
+            })
+    except Exception as exc:
+        errors.append(f"github: {exc}")
+
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "errors": errors,
+        "papers": papers,
+        "models": models,
+        "repos": repos,
+    }
+    aipulse_cache["at"] = now
+    aipulse_cache["payload"] = payload
+    return payload
+
+
 class MatrixHandler(SimpleHTTPRequestHandler):
     extensions_map = {
         **SimpleHTTPRequestHandler.extensions_map,
@@ -2001,6 +2205,39 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/intel"):
             payload = build_intel_payload()
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/api/stock"):
+            payload = build_stock_payload()
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/api/social"):
+            payload = build_social_payload()
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/api/aipulse"):
+            payload = build_aipulse_payload()
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

@@ -28,17 +28,17 @@
         </div>
         <p class="welcome-eyebrow"><span class="welcome-led"></span> MATRIX LIVE · AI INTELLIGENCE DESK</p>
         <h2 id="welcomeTitle">The AI Newsroom, Live</h2>
-        <p class="welcome-sub">A real-time intelligence desk streaming AI news, AI video, live activity, world events and global signals — updating second by second.</p>
+        <p class="welcome-sub">A real-time intelligence desk: AI news &amp; video, social pulse, research, markets and global signals — with JARVIS on comms.</p>
         <ul class="welcome-bullets">
-          <li>Live AI newswire + AI video, the moment it breaks</li>
-          <li>Real-time activity stream · global event flags on the map</li>
-          <li>Live cameras · markets · the world, monitored</li>
+          <li>Live AI newswire, video, research papers &amp; trending models</li>
+          <li>JARVIS announces breaking stories — ask him anything on the desk</li>
+          <li>Globe zooms to each story's location as it breaks</li>
         </ul>
         <button id="welcomeOk" type="button" class="welcome-ok" autofocus>Enter the Desk →</button>
       </div>
     </div>
 
-    <!-- In-app webview slide-out -->
+    <!-- In-app webview / story slide-out -->
     <aside id="webView" class="webview hidden" role="dialog" aria-modal="true" aria-labelledby="webViewTitle">
       <header class="webview-head">
         <div class="webview-meta">
@@ -51,6 +51,7 @@
         </div>
       </header>
       <div class="webview-body">
+        <div id="webViewStory" class="webview-story hidden"></div>
         <iframe id="webViewFrame" src="about:blank" sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-popups-to-escape-sandbox" referrerpolicy="no-referrer-when-downgrade"></iframe>
         <div id="webViewFallback" class="webview-fallback hidden">
           <h3>This source blocks embedded preview</h3>
@@ -100,7 +101,7 @@
             </div>
           </div>
           <button id="soundToggle" type="button" class="ctl" aria-pressed="false"><span class="ctl-ico">♪</span><span>Sound</span></button>
-          <button id="voiceToggle" type="button" class="ctl" aria-pressed="false" title="AI voice reads breaking headlines"><span class="ctl-ico">◉</span><span>AI Voice</span></button>
+          <button id="voiceToggle" type="button" class="ctl" aria-pressed="false" title="JARVIS announces breaking stories aloud"><span class="ctl-ico">◉</span><span>JARVIS</span></button>
           <button id="refreshButton" type="button" class="ctl ctl-primary"><span class="ctl-ico">↻</span><span>Refresh</span></button>
           <button id="fullscreenButton" type="button" class="ctl" title="Full screen"><span class="ctl-ico">⤢</span></button>
         </div>
@@ -109,18 +110,36 @@
       <!-- ===================== MAIN GRID ===================== -->
       <section class="deck-grid">
 
-        <!-- LEFT: live activity stream -->
-        <aside class="col-activity panel">
-          <div class="panel-head">
-            <span class="ph-title"><span class="live-dot"></span> Live Activity</span>
-            <span class="ph-meta" id="activityMeta">streaming</span>
-          </div>
-          <ol id="activityLog" class="activity-log" aria-live="polite"></ol>
-        </aside>
+        <!-- LEFT: live activity + global alerts -->
+        <div class="col-left">
+          <aside class="panel col-activity">
+            <div class="panel-head">
+              <span class="ph-title"><span class="live-dot"></span> Live Activity</span>
+              <span class="ph-meta" id="activityMeta">streaming</span>
+            </div>
+            <ol id="activityLog" class="activity-log" aria-live="polite"></ol>
+          </aside>
 
-        <!-- CENTER: AI hero + news stream -->
+          <aside class="panel alerts-card">
+            <div class="panel-head">
+              <span class="ph-title"><span class="live-dot live-dot--hot"></span> Global Alerts</span>
+              <span class="ph-meta" id="visibleCount">0</span>
+            </div>
+            <div id="detailPanel" class="detail-panel hidden"></div>
+            <div id="alertFeed" class="alert-feed"></div>
+          </aside>
+        </div>
+
+        <!-- CENTER: AI hero + social pulse + news stream -->
         <section class="col-stream">
           <a id="heroStory" class="hero hidden" target="_blank" rel="noreferrer"></a>
+
+          <div class="social-head">
+            <span class="ph-title"><span class="live-dot live-dot--violet"></span> Social Pulse</span>
+            <span class="ph-meta" id="socialMeta">mastodon · lemmy · hn-live</span>
+          </div>
+          <div id="socialStrip" class="social-strip"></div>
+
           <div class="stream-head">
             <span class="ph-title" id="railTitle"><span class="live-dot live-dot--hot"></span> AI Newswire</span>
             <span class="ph-meta" id="newsMeta">--</span>
@@ -128,7 +147,7 @@
           <div id="newsTrack" class="news-stream"></div>
         </section>
 
-        <!-- RIGHT: globe box + cameras + markets + alerts -->
+        <!-- RIGHT: globe box + cameras + Tesla + signals -->
         <aside class="col-side">
           <section class="panel globe-card">
             <div class="panel-head">
@@ -151,22 +170,30 @@
             <div id="cameraGrid" class="camera-grid-side"></div>
           </section>
 
-          <section class="panel markets-card">
+          <section class="panel tesla-card">
             <div class="panel-head">
-              <span class="ph-title">Markets &amp; Signals</span>
-              <span class="ph-meta" id="intelMeta">--</span>
+              <span class="ph-title"><span class="live-dot live-dot--amber"></span> TSLA · Tesla Inc.</span>
+              <span class="ph-meta" id="tslaState">--</span>
             </div>
-            <div class="crypto-bar" id="cryptoBar"><div class="crypto-bar-track" id="cryptoBarTrack"></div></div>
-            <div id="intelPanel" class="intel-panel"></div>
+            <div class="tesla-body">
+              <div class="tesla-quote">
+                <strong id="tslaPrice">--</strong>
+                <span id="tslaChange" class="tesla-change">--</span>
+              </div>
+              <canvas id="tslaChart" class="tesla-chart"></canvas>
+              <div class="tesla-range"><span id="tslaLow">L --</span><span id="tslaHigh">H --</span></div>
+            </div>
           </section>
 
-          <section class="panel alerts-card">
+          <section class="panel markets-card">
             <div class="panel-head">
-              <span class="ph-title"><span class="live-dot"></span> Global Alerts</span>
-              <span class="ph-meta" id="visibleCount">0</span>
+              <span class="ph-title">AI Signals · Markets</span>
+              <span class="ph-meta" id="intelMeta">--</span>
             </div>
-            <div id="detailPanel" class="detail-panel hidden"></div>
-            <div id="alertFeed" class="alert-feed"></div>
+            <div class="signals-scroll">
+              <div class="crypto-bar" id="cryptoBar"><div class="crypto-bar-track" id="cryptoBarTrack"></div></div>
+              <div id="intelPanel" class="intel-panel"></div>
+            </div>
           </section>
         </aside>
       </section>
@@ -181,7 +208,28 @@
       <!-- breaking popup floats above the ticker -->
       <div id="breakingPopup" class="breaking-popup hidden" role="alert" aria-live="assertive"></div>
 
-      <!-- hidden telemetry sinks (kept so app.js can write without errors) -->
+      <!-- ===================== JARVIS ===================== -->
+      <div id="jarvis" class="jarvis">
+        <div id="jarvisPanel" class="jarvis-panel hidden">
+          <div class="jarvis-head">
+            <span class="jarvis-title"><span class="jarvis-ring"></span> J.A.R.V.I.S.</span>
+            <span class="jarvis-sub">Just A Rather Very Intelligent System</span>
+            <button id="jarvisClose" type="button" class="jarvis-x" aria-label="Close">×</button>
+          </div>
+          <div id="jarvisLog" class="jarvis-log" aria-live="polite"></div>
+          <form id="jarvisForm" class="jarvis-form" autocomplete="off">
+            <input id="jarvisInput" type="text" placeholder="Ask JARVIS… (status, news, tesla, bitcoin)">
+            <button id="jarvisMic" type="button" class="jarvis-mic" title="Speak to JARVIS">🎙</button>
+            <button type="submit" class="jarvis-send" title="Send">➤</button>
+          </form>
+        </div>
+        <button id="jarvisOrb" class="jarvis-orb" type="button" title="Talk to JARVIS" aria-label="Open JARVIS">
+          <span class="jarvis-core"></span>
+          <span class="jarvis-orbit"></span>
+        </button>
+      </div>
+
+      <!-- hidden telemetry sinks -->
       <div class="hidden-sinks" aria-hidden="true">
         <span id="feedState"></span><span id="sourceCount"></span><span id="activeCount"></span>
         <span id="lastUpdated"></span><span id="newsTelemetry"></span><span id="aircraftTelemetry"></span>

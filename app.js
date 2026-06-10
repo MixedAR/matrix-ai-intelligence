@@ -65,6 +65,11 @@ const state = {
   hoveredEventId: null,
   pendingNews: [], // items waiting to be promoted to the rail (one is on screen as BREAKING)
   rawNews: [],      // full server-fetched list, used to compose visible state.news
+  stock: null,      // live TSLA quote + intraday points
+  social: [],       // social pulse posts (mastodon/lemmy/hn-live)
+  seenSocialIds: new Set(),
+  aipulse: null,    // arXiv papers + HF models + GitHub repos
+  camFocus: null,   // globe camera dolly state (in/hold/out)
   aiVideos: [],     // YouTube AI clips posted in the last hour
   gamingVideos: [], // YouTube gaming clips posted in the last 2 hours
   seenVideoIds: new Set(),
@@ -138,6 +143,26 @@ const els = {
   mAi: document.querySelector("#mAi"),
   mSources: document.querySelector("#mSources"),
   headlineTickerTrack: document.querySelector("#headlineTickerTrack"),
+  // Tesla card
+  tslaPrice: document.querySelector("#tslaPrice"),
+  tslaChange: document.querySelector("#tslaChange"),
+  tslaChart: document.querySelector("#tslaChart"),
+  tslaState: document.querySelector("#tslaState"),
+  tslaLow: document.querySelector("#tslaLow"),
+  tslaHigh: document.querySelector("#tslaHigh"),
+  // Social pulse
+  socialStrip: document.querySelector("#socialStrip"),
+  socialMeta: document.querySelector("#socialMeta"),
+  // Story slide-in
+  webViewStory: document.querySelector("#webViewStory"),
+  // JARVIS
+  jarvisOrb: document.querySelector("#jarvisOrb"),
+  jarvisPanel: document.querySelector("#jarvisPanel"),
+  jarvisClose: document.querySelector("#jarvisClose"),
+  jarvisLog: document.querySelector("#jarvisLog"),
+  jarvisForm: document.querySelector("#jarvisForm"),
+  jarvisInput: document.querySelector("#jarvisInput"),
+  jarvisMic: document.querySelector("#jarvisMic"),
 };
 
 const scene = new THREE.Scene();
@@ -662,8 +687,13 @@ function dropNewsFlag(item, isEmergency = false) {
   if (typeof addActivity === "function") addActivity("flag", `Map pin · ${lat.toFixed(1)}, ${lon.toFixed(1)} · ${item.source || ""}`);
 }
 
-// Rotate the globe (about Y) so a given lat/lon faces the camera, and pause
-// auto-rotation for a few seconds so the operator can read the flag.
+// Rotate the globe so a given lat/lon faces the camera AND dolly the camera
+// in close (so the user can actually see WHERE the news is), hold, then pull
+// back out. Auto-rotation pauses while focused.
+const GLOBE_HOME_DIST = 5.8;
+const GLOBE_ZOOM_DIST = 2.85;   // close enough that country shapes/labels read
+const GLOBE_ZOOM_HOLD_MS = 9000;
+
 function focusGlobeOnLatLon(lat, lon) {
   const P = latLngToVector3(lat, lon, 2.0);
   const camAz = Math.atan2(camera.position.x, camera.position.z);
@@ -671,7 +701,12 @@ function focusGlobeOnLatLon(lat, lon) {
   state.rotFocus = {
     target: camAz - beta,
     animating: true,
-    resumeAutoAt: performance.now() + 9000,
+    resumeAutoAt: performance.now() + GLOBE_ZOOM_HOLD_MS + 3500,
+  };
+  // Camera dolly: in → hold → out
+  state.camFocus = {
+    phase: "in",
+    holdUntil: 0,
   };
 }
 
@@ -1526,13 +1561,18 @@ function renderHero(item) {
   els.heroStory.dataset.embed = embedUrl;
   els.heroStory.dataset.source = item.source || "";
   els.heroStory.dataset.title = item.title || "";
+  // Videos play INLINE in the hero card (click-to-play YouTube embed);
+  // articles get the cinematic image treatment.
+  const media = isVideo && item.video_id
+    ? `<div class="hero-video"><iframe src="https://www.youtube.com/embed/${item.video_id}?rel=0" title="${escAttr(item.title)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe></div>`
+    : (img ? `<div class="hero-img" style="background-image:url('${img}')"></div><div class="hero-shade"></div>` : `<div class="hero-shade"></div>`);
+  els.heroStory.classList.toggle("hero--video", isVideo);
   els.heroStory.innerHTML = `
-    ${img ? `<div class="hero-img" style="background-image:url('${img}')"></div>` : ""}
-    <div class="hero-shade"></div>
+    ${media}
     <div class="hero-body">
       <div class="hero-row">${badge}<span class="hero-src">${item.source || ""}</span><span class="hero-time">${relativeTime(item.time)} ago</span></div>
       <h2>${item.title || ""}</h2>
-      <p>${item.summary || ""}</p>
+      ${isVideo ? "" : `<p>${item.summary || ""}</p>`}
     </div>`;
 }
 
@@ -1621,9 +1661,12 @@ function renderNews() {
 }
 
 /* === Live activity log === */
-const ACTIVITY_TAGS = { news: "NEWS", ai: "AI", video: "VIDEO", breaking: "BREAK", camera: "CAM", market: "MKT", flag: "FLAG", sync: "SYNC" };
+const ACTIVITY_TAGS = { news: "NEWS", ai: "AI", video: "VIDEO", breaking: "BREAK", camera: "CAM", market: "MKT", flag: "FLAG", sync: "SYNC", social: "SOC" };
 let activityCount = 0;
-function addActivity(kind, msg) {
+let activitySeq = 0;
+const activityItems = new Map(); // aid -> full story data for the slide-in
+
+function addActivity(kind, msg, data = null) {
   if (!els.activityLog || !msg) return;
   const li = document.createElement("li");
   li.className = `activity-item k-${kind}`;
@@ -1631,10 +1674,32 @@ function addActivity(kind, msg) {
   const ts = `${String(t.getUTCHours()).padStart(2, "0")}:${String(t.getUTCMinutes()).padStart(2, "0")}:${String(t.getUTCSeconds()).padStart(2, "0")}`;
   li.innerHTML = `<span class="at">${ts}</span><span class="tag">${ACTIVITY_TAGS[kind] || kind.toUpperCase()}</span><span class="msg"></span>`;
   li.querySelector(".msg").textContent = msg;
+  if (data) {
+    activitySeq += 1;
+    li.dataset.aid = String(activitySeq);
+    li.style.cursor = "pointer";
+    activityItems.set(String(activitySeq), data);
+    // Cap the map alongside the DOM
+    if (activityItems.size > 120) {
+      const firstKey = activityItems.keys().next().value;
+      activityItems.delete(firstKey);
+    }
+  }
   els.activityLog.prepend(li);
   activityCount += 1;
   while (els.activityLog.children.length > 60) els.activityLog.lastChild.remove();
   if (els.activityMeta) els.activityMeta.textContent = `${activityCount} events`;
+}
+
+// One delegated listener: click any activity row → full-story slide-in
+function initActivityClicks() {
+  if (!els.activityLog) return;
+  els.activityLog.addEventListener("click", (e) => {
+    const li = e.target.closest(".activity-item");
+    if (!li || !li.dataset.aid) return;
+    const item = activityItems.get(li.dataset.aid);
+    if (item) openWebView({ story: item });
+  });
 }
 
 /* === Animated number counters === */
@@ -1748,7 +1813,7 @@ function detectBreakingNews(items) {
     // Seed the live activity log with the most recent stories so it isn't empty
     items.slice(0, 12).reverse().forEach((item) => {
       const k = item.category === "emergency" ? "breaking" : "ai";
-      addActivity(k, `${item.source}: ${item.title}`);
+      addActivity(k, `${item.source}: ${item.title}`, item);
     });
     // Plant a few flags right away so the globe immediately shows AI news.
     const recentAi = items
@@ -1769,7 +1834,7 @@ function detectBreakingNews(items) {
     state.pendingNews.push(...incoming);
     incoming.forEach((item) => {
       const isEmergency = item.category === "emergency";
-      addActivity(isEmergency ? "breaking" : "ai", `${item.source}: ${item.title}`);
+      addActivity(isEmergency ? "breaking" : "ai", `${item.source}: ${item.title}`, item);
       if (item.category === "ai" || isEmergency) dropNewsFlag(item, isEmergency);
     });
   }
@@ -1809,7 +1874,7 @@ function showNextBreakingPopup() {
   state.breakingTimer = setTimeout(() => dismissBreakingPopup(true), 30000);
 
   playAlertSound("breaking-news");
-  speakHeadline(item.title);
+  jarvisAnnounce(item);
 }
 
 function dismissBreakingPopup(promote = true) {
@@ -1899,9 +1964,54 @@ function hideMapTooltip() {
  * publishers block iframe embedding via X-Frame-Options, in which case the
  * fallback overlay invites them to open externally instead. YouTube embeds
  * work natively (we use /embed/ URLs for video cards). */
-function openWebView({ url, externalUrl, source, title }) {
+function openWebView({ url, externalUrl, source, title, story }) {
   if (!els.webView) return;
+
+  // STORY MODE — a formatted full-story view (used by the live-activity feed).
+  // Reliable even when the publisher blocks iframes; "Read original" loads the
+  // iframe in place.
+  if (story) {
+    const isEmergency = story.category === "emergency";
+    const isVideo = !!story._isVideo;
+    const img = story.thumbnail || (story.video_id ? `https://i.ytimg.com/vi/${story.video_id}/hqdefault.jpg` : "");
+    const embedUrl = isVideo && story.video_id ? `https://www.youtube.com/embed/${story.video_id}?autoplay=1` : "";
+    els.webViewSource.textContent = story.source || "DESK";
+    els.webViewTitle.textContent = story.title || "";
+    els.webViewExternal.href = story.url || "#";
+    els.webViewFallback.classList.add("hidden");
+    els.webViewFrame.classList.add("hidden");
+    els.webViewFrame.src = "about:blank";
+    if (els.webViewStory) {
+      els.webViewStory.classList.remove("hidden");
+      els.webViewStory.innerHTML = `
+        <span class="story-badge ${isEmergency ? "emergency" : ""}">${isEmergency ? "● EMERGENCY" : isVideo ? "● AI VIDEO" : "● AI INTELLIGENCE"}</span>
+        <h1>${story.title || ""}</h1>
+        <div class="story-meta">
+          <span><b>SOURCE</b> ${story.source || "—"}</span>
+          <span><b>FILED</b> ${story.time ? `${relativeTime(story.time)} ago` : "—"}</span>
+          ${story.category ? `<span><b>CHANNEL</b> ${story.category.toUpperCase()}</span>` : ""}
+          ${story.score != null ? `<span><b>ENGAGEMENT</b> ${story.score}▲</span>` : ""}
+        </div>
+        ${img ? `<img class="story-img" src="${img}" alt="" loading="lazy">` : ""}
+        <p class="story-summary">${story.summary || story.text || "No further detail on the wire yet — open the original for the full report."}</p>
+        <div class="story-actions">
+          ${story.url || embedUrl ? `<button type="button" class="story-open">${isVideo ? "▶ Play video here" : "Read original here"} →</button>` : ""}
+        </div>`;
+      const openBtn = els.webViewStory.querySelector(".story-open");
+      if (openBtn) {
+        openBtn.addEventListener("click", () => {
+          openWebView({ url: embedUrl || story.url, externalUrl: story.url, source: story.source, title: story.title });
+        }, { once: true });
+      }
+    }
+    els.webView.classList.remove("hidden");
+    requestAnimationFrame(() => els.webView.classList.add("open"));
+    return;
+  }
+
   if (!url) return;
+  if (els.webViewStory) { els.webViewStory.classList.add("hidden"); els.webViewStory.innerHTML = ""; }
+  els.webViewFrame.classList.remove("hidden");
   els.webViewSource.textContent = source || "SOURCE";
   els.webViewTitle.textContent = title || url;
   els.webViewExternal.href = externalUrl || url;
@@ -1928,7 +2038,8 @@ function closeWebView() {
   els.webView.classList.remove("open");
   setTimeout(() => {
     els.webView.classList.add("hidden");
-    if (els.webViewFrame) els.webViewFrame.src = "about:blank";
+    if (els.webViewFrame) { els.webViewFrame.src = "about:blank"; els.webViewFrame.classList.remove("hidden"); }
+    if (els.webViewStory) { els.webViewStory.classList.add("hidden"); els.webViewStory.innerHTML = ""; }
   }, 320);
 }
 
@@ -1972,83 +2083,57 @@ function renderHnTicker() {
 
 /* === Intel widgets === */
 function renderIntel() {
-  // Crypto and HN have moved to top bars — render those first
+  // Crypto fills the markets card top; HN feeds the bottom ticker
   renderCryptoBar();
   renderHnTicker();
-  if (!state.intel.length) {
-    els.intelPanel.innerHTML = `<div class="intel-card"><div class="intel-card-head">Loading intel</div></div>`;
-    return;
+  // The signals panel = AI Pulse (trending models, fresh papers, hot repos) +
+  // the next SpaceX launch. FX/wiki/APOD removed per design.
+  const pulse = state.aipulse || {};
+  const spacex = (state.intel.find((w) => w.kind === "spacex") || {}).items?.[0];
+  const blocks = [];
+
+  if (pulse.models?.length) {
+    blocks.push(`
+      <div class="intel-card">
+        <div class="intel-card-head">🤗 Trending Models<small>huggingface</small></div>
+        ${pulse.models.slice(0, 6).map((m) => `
+          <a href="${m.url}" target="_blank" rel="noreferrer">${m.id}<span class="meta">${m.likes ?? 0}♥ · ${m.task || ""}</span></a>
+        `).join("")}
+      </div>`);
   }
-  // Sidebar only shows the non-relocated widgets
-  const sidebarWidgets = state.intel.filter((w) => w.kind !== "crypto" && w.kind !== "hn");
-  els.intelMeta.textContent = `${sidebarWidgets.length} live`;
-  els.intelPanel.innerHTML = sidebarWidgets.map((widget) => {
-    if (widget.kind === "crypto") {
-      return `
-        <div class="intel-card">
-          <div class="intel-card-head">${widget.title}<small>${widget.source}</small></div>
-          ${widget.items.map((c) => {
-            const change = Number(c.change);
-            const cls = change >= 0 ? "up" : "down";
-            const sign = change >= 0 ? "+" : "";
-            return `<div class="intel-row">
-              <div><span class="sym">${c.symbol}</span><span class="name">${c.name}</span></div>
-              <div><span class="val">$${formatPrice(c.price)}</span><span class="delta ${cls}">${sign}${change?.toFixed(2)}%</span></div>
-            </div>`;
-          }).join("")}
-        </div>`;
-    }
-    if (widget.kind === "fx") {
-      return `
-        <div class="intel-card">
-          <div class="intel-card-head">${widget.title}<small>${widget.source}</small></div>
-          ${widget.items.map((r) => `
-            <div class="intel-row">
-              <div><span class="sym">${r.symbol}</span><span class="name">per USD</span></div>
-              <div><span class="val">${Number(r.rate).toFixed(r.rate < 10 ? 4 : 2)}</span></div>
-            </div>
-          `).join("")}
-        </div>`;
-    }
-    if (widget.kind === "hn") {
-      return `
-        <div class="intel-card">
-          <div class="intel-card-head">${widget.title}<small>${widget.source}</small></div>
-          ${widget.items.map((s) => `
-            <a href="${s.url}" target="_blank" rel="noreferrer">${s.title}<span class="meta">${s.score || 0}▲ · ${s.descendants || 0}💬</span></a>
-          `).join("")}
-        </div>`;
-    }
-    if (widget.kind === "wiki") {
-      return `
-        <div class="intel-card">
-          <div class="intel-card-head">${widget.title}<small>${widget.source}</small></div>
-          ${widget.items.map((s) => `<a href="${s.url || "#"}" target="_blank" rel="noreferrer">${s.title}</a>`).join("")}
-        </div>`;
-    }
-    if (widget.kind === "apod") {
-      const item = widget.items[0] || {};
-      const img = item.media_type === "image" && item.url ? `<img src="${item.url}" alt="${item.title || ""}" loading="lazy">` : "";
-      return `
-        <div class="intel-card">
-          <div class="intel-card-head">${widget.title}<small>${item.date || ""}</small></div>
-          ${img}
-          <a href="${item.url || "#"}" target="_blank" rel="noreferrer">${item.title || "Astronomy Picture of the Day"}</a>
-          <p>${item.explanation || ""}</p>
-        </div>`;
-    }
-    if (widget.kind === "spacex") {
-      const item = widget.items[0] || {};
-      return `
-        <div class="intel-card">
-          <div class="intel-card-head">${widget.title}<small>${widget.source}</small></div>
-          <a href="${item.links || "#"}" target="_blank" rel="noreferrer">${item.name || "Next launch"}</a>
-          <p>${item.details || "Launch details pending."}</p>
-          <p class="meta">T-${item.date ? formatCountdown(item.date) : "TBA"}</p>
-        </div>`;
-    }
-    return "";
-  }).join("");
+  if (pulse.papers?.length) {
+    blocks.push(`
+      <div class="intel-card">
+        <div class="intel-card-head">📄 Latest AI Research<small>arXiv cs.AI</small></div>
+        ${pulse.papers.slice(0, 6).map((p) => `
+          <a href="${p.url}" target="_blank" rel="noreferrer">${p.title}<span class="meta">${relativeTime(p.time)}</span></a>
+        `).join("")}
+      </div>`);
+  }
+  if (pulse.repos?.length) {
+    blocks.push(`
+      <div class="intel-card">
+        <div class="intel-card-head">⭐ Fresh AI Repos<small>github · this week</small></div>
+        ${pulse.repos.slice(0, 5).map((r) => `
+          <a href="${r.url}" target="_blank" rel="noreferrer">${r.name}<span class="meta">${r.stars}★</span></a>
+        `).join("")}
+      </div>`);
+  }
+  if (spacex) {
+    blocks.push(`
+      <div class="intel-card">
+        <div class="intel-card-head">🚀 Next SpaceX Launch<small>spacex</small></div>
+        <a href="${spacex.links || "#"}" target="_blank" rel="noreferrer">${spacex.name || "Next launch"}</a>
+        <p class="meta">T-${spacex.date ? formatCountdown(spacex.date) : "TBA"}</p>
+      </div>`);
+  }
+  if (els.intelMeta) {
+    const n = (pulse.models?.length || 0) + (pulse.papers?.length || 0) + (pulse.repos?.length || 0);
+    els.intelMeta.textContent = n ? `${n} signals live` : "loading…";
+  }
+  if (els.intelPanel) {
+    els.intelPanel.innerHTML = blocks.join("") || `<div class="intel-card"><div class="intel-card-head">Loading AI signals…</div></div>`;
+  }
 }
 
 function formatPrice(n) {
@@ -2066,6 +2151,312 @@ function formatCountdown(iso) {
   const hours = Math.floor((abs % 86400000) / 3600000);
   const sign = t < 0 ? "+" : "";
   return `${sign}${days}d ${hours}h`;
+}
+
+/* =========================================================================
+   TESLA — live quote + intraday sparkline (Yahoo via /api/stock, 60s poll)
+   ========================================================================= */
+async function pollStock() {
+  try {
+    const res = await fetch(`/api/stock?ts=${Date.now()}`);
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!d || d.price == null) return;
+    const prevPrice = state.stock?.price;
+    state.stock = d;
+    const up = (d.change ?? 0) >= 0;
+    if (els.tslaPrice) els.tslaPrice.textContent = `$${Number(d.price).toFixed(2)}`;
+    if (els.tslaChange) {
+      els.tslaChange.textContent = `${up ? "▲" : "▼"} ${Math.abs(d.change ?? 0).toFixed(2)} (${Math.abs(d.changePct ?? 0).toFixed(2)}%)`;
+      els.tslaChange.className = `tesla-change ${up ? "up" : "down"}`;
+    }
+    if (els.tslaState) els.tslaState.textContent = (d.marketState || "LIVE").toString().toUpperCase();
+    if (els.tslaLow) els.tslaLow.textContent = `L $${Number(d.dayLow ?? 0).toFixed(2)}`;
+    if (els.tslaHigh) els.tslaHigh.textContent = `H $${Number(d.dayHigh ?? 0).toFixed(2)}`;
+    drawTslaChart(d.points || [], up, d.prevClose);
+    if (prevPrice != null && prevPrice !== d.price) {
+      addActivity("market", `TSLA $${Number(d.price).toFixed(2)} ${up ? "▲" : "▼"}${Math.abs(d.changePct ?? 0).toFixed(2)}%`);
+    }
+  } catch (_) { /* transient */ }
+}
+
+function drawTslaChart(points, up, prevClose) {
+  const cv = els.tslaChart;
+  if (!cv || !points.length) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = cv.clientWidth || 320;
+  const h = cv.clientHeight || 84;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  const vals = points.map((p) => p.c);
+  let min = Math.min(...vals), max = Math.max(...vals);
+  if (prevClose) { min = Math.min(min, prevClose); max = Math.max(max, prevClose); }
+  const pad = (max - min) * 0.12 || 1;
+  min -= pad; max += pad;
+  const X = (i) => (i / (points.length - 1)) * (w - 4) + 2;
+  const Y = (v) => h - ((v - min) / (max - min)) * (h - 6) - 3;
+  const color = up ? "#22e6a0" : "#ff5a3c";
+  // prev-close dashed reference line
+  if (prevClose) {
+    ctx.strokeStyle = "rgba(126,156,214,0.35)";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, Y(prevClose)); ctx.lineTo(w, Y(prevClose)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // area fill
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, up ? "rgba(34,230,160,0.28)" : "rgba(255,90,60,0.28)");
+  grad.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.beginPath();
+  points.forEach((p, i) => { const x = X(i), y = Y(p.c); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+  ctx.lineTo(X(points.length - 1), h); ctx.lineTo(X(0), h); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+  // price line
+  ctx.beginPath();
+  points.forEach((p, i) => { const x = X(i), y = Y(p.c); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.stroke();
+  // last-price dot
+  const lx = X(points.length - 1), ly = Y(points[points.length - 1].c);
+  ctx.beginPath(); ctx.arc(lx, ly, 2.6, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+}
+
+/* =========================================================================
+   SOCIAL PULSE — Mastodon + Lemmy + HN-live (small cards above the stream)
+   ========================================================================= */
+const NETWORK_LABEL = { mastodon: "MSTDN", lemmy: "LEMMY", hn: "HN" };
+
+async function pollSocial(opts = {}) {
+  try {
+    const res = await fetch(`/api/social?ts=${Date.now()}`);
+    if (!res.ok) return;
+    const d = await res.json();
+    const items = d.items || [];
+    // Activity entries for never-seen posts (skip flood on bootstrap)
+    if (!opts.bootstrap) {
+      items.filter((i) => !state.seenSocialIds.has(i.id)).slice(0, 4).forEach((i) => {
+        addActivity("social", `${i.author}: ${i.text.slice(0, 90)}`, { ...i, title: i.text.slice(0, 120), source: i.author, category: "social" });
+      });
+    }
+    items.forEach((i) => state.seenSocialIds.add(i.id));
+    state.social = items;
+    renderSocialStrip();
+  } catch (_) { /* transient */ }
+}
+
+function renderSocialStrip() {
+  if (!els.socialStrip) return;
+  const items = (state.social || []).slice(0, 16);
+  if (!items.length) {
+    els.socialStrip.innerHTML = `<div class="social-card"><p>Listening for social chatter…</p></div>`;
+    return;
+  }
+  if (els.socialMeta) {
+    const nets = [...new Set(items.map((i) => i.network))];
+    els.socialMeta.textContent = `${items.length} posts · ${nets.join(" · ")}`;
+  }
+  els.socialStrip.innerHTML = items.map((i) => `
+    <a class="social-card" href="${i.url || "#"}" target="_blank" rel="noreferrer" data-social-id="${i.id}">
+      <div class="social-card-meta">
+        <span class="social-net ${i.network}">${NETWORK_LABEL[i.network] || i.network}</span>
+        <span class="social-author">${i.author || ""}</span>
+        <span class="social-score">${i.score ? `${i.score}▲` : ""}</span>
+      </div>
+      <p>${i.text || ""}</p>
+      <span class="social-time">${relativeTime(i.time)} ago</span>
+    </a>
+  `).join("");
+}
+
+/* =========================================================================
+   AI PULSE — arXiv papers, HF models, GitHub repos (10-min poll)
+   ========================================================================= */
+async function pollAiPulse() {
+  try {
+    const res = await fetch(`/api/aipulse?ts=${Date.now()}`);
+    if (!res.ok) return;
+    state.aipulse = await res.json();
+    renderIntel();
+  } catch (_) { /* transient */ }
+}
+
+/* =========================================================================
+   J.A.R.V.I.S. — desk voice agent
+   "Just A Rather Very Intelligent System"
+   ========================================================================= */
+const JARVIS_OPENERS = [
+  "Pardon the interruption, sir.",
+  "Sir, incoming intelligence.",
+  "Apologies for the intrusion, sir.",
+  "Sir, you may want to see this.",
+  "A development on the wire, sir.",
+];
+
+function jarvisGreeting() {
+  const h = new Date().getHours();
+  const tod = h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+  return `${tod}, sir. All desk systems are online. I'll keep you informed as events develop.`;
+}
+
+function jarvisLogMsg(from, text) {
+  if (!els.jarvisLog) return;
+  const div = document.createElement("div");
+  div.className = `jarvis-msg from-${from}`;
+  div.textContent = text;
+  els.jarvisLog.appendChild(div);
+  els.jarvisLog.scrollTop = els.jarvisLog.scrollHeight;
+  while (els.jarvisLog.children.length > 50) els.jarvisLog.firstChild.remove();
+}
+
+// JARVIS speaks with the British male voice (Daniel) when available —
+// the closest match to the films. Falls back to the Google TTS proxy.
+function jarvisSpeak(text) {
+  jarvisLogMsg("jarvis", text);
+  if (!state.voiceEnabled) return;
+  if (els.jarvisOrb) {
+    els.jarvisOrb.classList.add("speaking");
+    setTimeout(() => els.jarvisOrb.classList.remove("speaking"), Math.min(12000, text.length * 65));
+  }
+  stopActiveVoice();
+  try {
+    if ("speechSynthesis" in window) {
+      const utter = new SpeechSynthesisUtterance(text);
+      const v = pickPreferredVoice(); // prefers Daniel (en-GB male)
+      if (v) utter.voice = v;
+      utter.rate = 1.04;
+      utter.pitch = 0.92;
+      utter.volume = 0.95;
+      speechSynthesis.speak(utter);
+      return;
+    }
+  } catch (_) {}
+  // Fallback: server TTS
+  try {
+    const audio = new Audio(`/api/tts?lang=en-GB&text=${encodeURIComponent(text)}`);
+    audio.volume = 0.9;
+    const handle = { audio, suppressFallback: true };
+    liveVoiceAudios.add(handle);
+    audio.play().catch(() => {});
+  } catch (_) {}
+}
+
+// Breaking-news announcements, JARVIS style
+function jarvisAnnounce(item) {
+  const isEmergency = item.category === "emergency";
+  const opener = isEmergency
+    ? "Sir, priority alert."
+    : JARVIS_OPENERS[Math.floor(Math.random() * JARVIS_OPENERS.length)];
+  const tail = isEmergency ? " I suggest your immediate attention." : "";
+  jarvisSpeak(`${opener} ${item.source || "The wire"} reports: ${item.title}.${tail}`);
+}
+
+// Rule-based command brain — answers from live desk state
+function jarvisAnswer(qRaw) {
+  const q = (qRaw || "").toLowerCase();
+  const newsTop = [...state.news].filter((i) => isFresh(i)).slice(0, 3);
+  const btc = (state.intel.find((w) => w.kind === "crypto") || {}).items?.find((c) => (c.symbol || "").toUpperCase() === "BTC");
+
+  if (/\b(hello|hi|hey|good (morning|afternoon|evening))\b/.test(q)) return jarvisGreeting();
+  if (/\b(who are you|your name|what are you)\b/.test(q))
+    return "I am JARVIS — Just A Rather Very Intelligent System. I monitor the newswire, the markets, the cameras and the globe so you don't have to, sir.";
+  if (/\b(status|report|systems?|how('s| is) (it|everything))\b/.test(q)) {
+    const cams = state.cameras.filter((c) => c.embedUrl).length;
+    return `All systems nominal, sir. ${els.mSources?.textContent || "—"} sources streaming, ${state.news.length} stories on the wire, ${cams} live cameras, and ${state.events.length} global signals tracked.`;
+  }
+  if (/\b(tesla|tsla|stock|elon)\b/.test(q)) {
+    const s = state.stock;
+    if (!s || s.price == null) return "Tesla telemetry is still coming online, sir. One moment.";
+    const dir = (s.change ?? 0) >= 0 ? "up" : "down";
+    return `Tesla is trading at $${Number(s.price).toFixed(2)}, ${dir} ${Math.abs(s.changePct ?? 0).toFixed(2)} percent on the day. Range $${Number(s.dayLow).toFixed(0)} to $${Number(s.dayHigh).toFixed(0)}, sir.`;
+  }
+  if (/\b(bitcoin|btc|crypto|ethereum|eth)\b/.test(q)) {
+    if (!btc) return "Crypto telemetry is warming up, sir.";
+    const ch = Number(btc.change);
+    return `Bitcoin stands at $${formatPrice(btc.price)}, ${ch >= 0 ? "up" : "down"} ${Math.abs(ch).toFixed(2)} percent over twenty-four hours, sir.`;
+  }
+  if (/\b(news|headline|latest|happening|brief)\b/.test(q)) {
+    if (!newsTop.length) return "The wire is quiet at the moment, sir. I'll alert you the instant something breaks.";
+    return `The latest, sir: ${newsTop.map((i, n) => `${n + 1}. ${i.title}`).join(". ")}.`;
+  }
+  if (/\b(video)\b/.test(q)) {
+    const v = state.aiVideos[0];
+    return v ? `The most recent AI video is "${v.title}" from ${v.source}, sir. It's queued on the desk.` : "No fresh AI video in the current window, sir.";
+  }
+  if (/\b(camera|cams)\b/.test(q)) {
+    const cams = state.cameras.filter((c) => c.embedUrl);
+    return `${cams.length} live cameras on the wall, sir: ${cams.map((c) => c.title.replace(/ Live$/, "")).join("; ")}.`;
+  }
+  if (/\b(time|clock|date)\b/.test(q)) {
+    return `It is ${new Date().toUTCString().replace("GMT", "UTC")}, sir.`;
+  }
+  if (/\b(research|paper|arxiv|model)\b/.test(q)) {
+    const p = state.aipulse?.papers?.[0];
+    const m = state.aipulse?.models?.[0];
+    const parts = [];
+    if (p) parts.push(`the latest paper on arXiv is "${p.title}"`);
+    if (m) parts.push(`the trending model on Hugging Face is ${m.id}`);
+    return parts.length ? `From the research wire, sir: ${parts.join(", and ")}.` : "The research feed is still loading, sir.";
+  }
+  if (/\b(thank|thanks|cheers)\b/.test(q)) return "Always a pleasure, sir.";
+  if (/\b(joke|funny)\b/.test(q)) return "I would tell you a joke about artificial intelligence, sir, but you'd only say I made it up.";
+  return "I'm afraid that's beyond my current clearance, sir. A direct uplink to a language model would expand my faculties considerably — do say the word.";
+}
+
+function handleJarvisQuery(text) {
+  const t = (text || "").trim();
+  if (!t) return;
+  jarvisLogMsg("user", t);
+  setTimeout(() => jarvisSpeak(jarvisAnswer(t)), 220);
+}
+
+let jarvisRecognition = null;
+function initJarvis() {
+  if (!els.jarvisOrb) return;
+  els.jarvisOrb.addEventListener("click", () => {
+    const opening = els.jarvisPanel.classList.contains("hidden");
+    els.jarvisPanel.classList.toggle("hidden");
+    if (opening && !els.jarvisLog.children.length) {
+      jarvisSpeak(jarvisGreeting());
+    }
+    if (opening) setTimeout(() => els.jarvisInput?.focus(), 120);
+  });
+  if (els.jarvisClose) els.jarvisClose.addEventListener("click", () => els.jarvisPanel.classList.add("hidden"));
+  if (els.jarvisForm) {
+    els.jarvisForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      handleJarvisQuery(els.jarvisInput.value);
+      els.jarvisInput.value = "";
+    });
+  }
+  // Voice input (Chrome/Edge SpeechRecognition)
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (SR && els.jarvisMic) {
+    jarvisRecognition = new SR();
+    jarvisRecognition.lang = "en-US";
+    jarvisRecognition.interimResults = false;
+    jarvisRecognition.maxAlternatives = 1;
+    jarvisRecognition.onresult = (e) => {
+      const said = e.results[0][0].transcript;
+      els.jarvisInput.value = said;
+      handleJarvisQuery(said);
+      els.jarvisInput.value = "";
+    };
+    const stopUi = () => { els.jarvisMic.classList.remove("listening"); els.jarvisOrb.classList.remove("listening"); };
+    jarvisRecognition.onend = stopUi;
+    jarvisRecognition.onerror = stopUi;
+    els.jarvisMic.addEventListener("click", () => {
+      try {
+        els.jarvisMic.classList.add("listening");
+        els.jarvisOrb.classList.add("listening");
+        jarvisRecognition.start();
+      } catch (_) { /* already started */ }
+    });
+  } else if (els.jarvisMic) {
+    els.jarvisMic.disabled = true;
+    els.jarvisMic.title = "Voice input requires Chrome/Edge";
+    els.jarvisMic.style.opacity = "0.4";
+  }
 }
 
 function renderPopup(event) {
@@ -2425,14 +2816,13 @@ function setVoiceEnabled(on) {
   localStorage.setItem("matrix.voiceEnabled", on ? "1" : "0");
   if (els.voiceToggle) {
     const span = els.voiceToggle.querySelector("span:last-child");
-    if (span) span.textContent = on ? "Voice On" : "AI Voice";
+    if (span) span.textContent = on ? "JARVIS On" : "JARVIS";
     els.voiceToggle.classList.toggle("voice-on", on);
     els.voiceToggle.setAttribute("aria-pressed", String(on));
   }
   if (on) {
-    // Browsers require a user gesture before audio plays.
-    // Toggling counts, so we can announce a confirmation now (British female).
-    speakHeadline("AI voice agent activated. Standing by for breaking headlines.");
+    // The toggle click is the user gesture browsers require before audio.
+    jarvisSpeak("Voice protocols engaged, sir. I'll announce breaking developments as they arrive.");
   } else {
     stopActiveVoice();
   }
@@ -2653,6 +3043,30 @@ function animate(time) {
     }
   } else if (state.autoRotate && (!state.rotFocus || nowp > state.rotFocus.resumeAutoAt)) {
     globeGroup.rotation.y += 0.0009;
+  }
+
+  // Camera dolly: zoom IN to the news location, hold, then pull back OUT.
+  if (state.camFocus) {
+    const f = state.camFocus;
+    const len = camera.position.length();
+    if (f.phase === "in") {
+      const next = len + (GLOBE_ZOOM_DIST - len) * 0.07;
+      camera.position.setLength(next);
+      if (Math.abs(next - GLOBE_ZOOM_DIST) < 0.03) {
+        camera.position.setLength(GLOBE_ZOOM_DIST);
+        f.phase = "hold";
+        f.holdUntil = nowp + GLOBE_ZOOM_HOLD_MS;
+      }
+    } else if (f.phase === "hold") {
+      if (nowp > f.holdUntil) f.phase = "out";
+    } else if (f.phase === "out") {
+      const next = len + (GLOBE_HOME_DIST - len) * 0.05;
+      camera.position.setLength(next);
+      if (Math.abs(next - GLOBE_HOME_DIST) < 0.04) {
+        camera.position.setLength(GLOBE_HOME_DIST);
+        state.camFocus = null;
+      }
+    }
   }
   markerGroup.rotation.y = globeGroup.rotation.y;
   newsFlagGroup.rotation.y = globeGroup.rotation.y;
@@ -2926,7 +3340,7 @@ async function pollYouTubeVideos(opts = {}) {
       if (newIds.size > 0) {
         state.freshVideoIds = new Set([...state.freshVideoIds, ...newIds]);
         playAlertSound("video");
-        incoming.filter((v) => newIds.has(v.id)).forEach((v) => addActivity("video", `${v.source}: ${v.title}`));
+        incoming.filter((v) => newIds.has(v.id)).forEach((v) => addActivity("video", `${v.source}: ${v.title}`, { ...v, _isVideo: true }));
         setTimeout(() => {
           newIds.forEach((id) => state.freshVideoIds.delete(id));
           renderNews();
@@ -2987,6 +3401,15 @@ pollYouTubeVideos({ bootstrap: true });
 setInterval(pollYouTubeVideos, 15 * 60 * 1000); // YouTube videos every 15 min
 startNewsTicker();
 attachAudioUnlock();
+// New desk feeds
+pollStock();
+setInterval(pollStock, 60 * 1000);              // TSLA quote + chart every 60s
+pollSocial({ bootstrap: true });
+setInterval(pollSocial, 2 * 60 * 1000);         // social pulse every 2 min
+pollAiPulse();
+setInterval(pollAiPulse, 10 * 60 * 1000);       // research pulse every 10 min
+initActivityClicks();
+initJarvis();
 
 /* === Welcome modal + intro music ===
  * On first session load, show a centered welcome modal with an OK button.
