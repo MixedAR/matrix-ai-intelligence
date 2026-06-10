@@ -1,56 +1,70 @@
 const { chromium, devices } = require("playwright");
 const fs = require("fs");
 
+const VERIFY_URL = process.env.MATRIX_VERIFY_URL || "http://127.0.0.1:8000/";
+
+async function count(page, selector) {
+  return page.locator(selector).count();
+}
+
 async function verifyViewport(browser, name, options) {
   const context = await browser.newContext(options);
   const page = await context.newPage();
   const errors = [];
+
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
   });
 
-  await page.goto("http://127.0.0.1:8000/", { waitUntil: "networkidle" });
-  await page.waitForSelector("canvas", { timeout: 15000 });
-  await page.waitForFunction(() => document.querySelectorAll(".alert-card").length > 0, null, { timeout: 15000 });
-  await page.waitForTimeout(1200);
+  await page.goto(VERIFY_URL, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(".ops-shell", { timeout: 15000 });
+  await page.waitForFunction(() => document.querySelectorAll("#priorityGrid .intel-card").length >= 1, null, { timeout: 70000 });
+  await page.waitForFunction(() => document.querySelectorAll("#newsGrid .queue-feature-card, #newsGrid .queue-card").length >= 1, null, { timeout: 70000 });
+  await page.waitForFunction(() => document.querySelectorAll("#videoRail .video-card").length >= 1, null, { timeout: 70000 });
+  await page.waitForTimeout(1000);
 
   const title = await page.locator("h1").innerText();
-  const cards = await page.locator(".alert-card").count();
-  const layers = await page.locator(".layer-toggle input").count();
-  const startupPopupVisible = await page.locator("#eventPopup:not(.hidden)").count();
-  await page.locator(".alert-card").first().click();
-  await page.waitForFunction(() => !document.querySelector("#eventPopup")?.classList.contains("hidden"), null, { timeout: 5000 });
-  const clickedPopupVisible = await page.locator("#eventPopup:not(.hidden)").count();
+  const priorityCards = await count(page, "#priorityGrid .intel-card");
+  const videoCards = await count(page, "#videoRail .video-card");
+  const queueFeature = await count(page, "#newsGrid .queue-feature-card");
+  const queueMiniCards = await count(page, "#newsGrid .queue-mini-card");
+  const radarBlips = await count(page, "#radarBlips .blip");
+  const socialCards = await count(page, "#socialFeed .social-card");
+  const pulseCards = await count(page, "#pulseStack .pulse-card");
+  const jarvisBlob = await count(page, "#jarvisBlob .blob-core");
+  const sourcePanel = await count(page, ".source-panel");
+  const tickerText = await page.locator("#tickerTrack").innerText();
+  const tsla = await page.locator("#metricTsla").innerText();
 
-  const pixels = await page.evaluate(() => {
-    const canvas = document.querySelector("canvas");
-    const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
-    const points = [
-      [Math.floor(canvas.width / 2), Math.floor(canvas.height / 2)],
-      [Math.floor(canvas.width * 0.35), Math.floor(canvas.height * 0.42)],
-      [Math.floor(canvas.width * 0.65), Math.floor(canvas.height * 0.58)],
-    ];
-    return points.map(([x, y]) => {
-      const data = new Uint8Array(4);
-      gl.readPixels(x, canvas.height - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, data);
-      return Array.from(data);
-    });
-  });
-
-  const nonBlankPixels = pixels.filter((rgba) => rgba[0] + rgba[1] + rgba[2] + rgba[3] > 0).length;
   await page.screenshot({ path: `artifacts/${name}.png`, fullPage: true });
   await context.close();
 
-  if (title !== "Matrix AI Intelligence") throw new Error(`${name}: title mismatch`);
-  if (cards < 1) throw new Error(`${name}: alert feed did not render`);
-  if (layers < 4) throw new Error(`${name}: layer controls did not render`);
-  if (startupPopupVisible !== 0) throw new Error(`${name}: startup popup should stay hidden`);
-  if (clickedPopupVisible < 1) throw new Error(`${name}: clicked event popup did not render`);
-  if (nonBlankPixels < 2) throw new Error(`${name}: WebGL canvas appears blank: ${JSON.stringify(pixels)}`);
+  if (!/^MATRIX/.test(title)) throw new Error(`${name}: title mismatch: ${title}`);
+  if (priorityCards < 1) throw new Error(`${name}: priority cards did not render`);
+  if (videoCards < 1) throw new Error(`${name}: video cards did not render`);
+  if (queueFeature < 1) throw new Error(`${name}: queue feature did not render`);
+  if (queueMiniCards < 1) throw new Error(`${name}: queue rail did not render`);
+  if (radarBlips < 1) throw new Error(`${name}: radar blips did not render`);
+  if (socialCards < 1) throw new Error(`${name}: social feed did not render`);
+  if (pulseCards < 1) throw new Error(`${name}: research/model stack did not render`);
+  if (jarvisBlob < 1) throw new Error(`${name}: Jarvis blob did not render`);
+  if (sourcePanel !== 0) throw new Error(`${name}: old source panel should be removed`);
+  if (!tickerText.trim()) throw new Error(`${name}: ticker is empty`);
+  if (!tsla.trim() || tsla.trim() === "--") throw new Error(`${name}: TSLA metric is empty`);
   if (errors.length) throw new Error(`${name}: browser errors: ${errors.join(" | ")}`);
 
-  return { name, cards, layers, startupPopupVisible, clickedPopupVisible, pixels };
+  return {
+    name,
+    priorityCards,
+    videoCards,
+    queueFeature,
+    queueMiniCards,
+    radarBlips,
+    socialCards,
+    pulseCards,
+    tsla,
+  };
 }
 
 (async () => {

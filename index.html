@@ -3,245 +3,172 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>MATRIX LIVE // AI Intelligence Desk</title>
+    <title>MATRIX INTEL // AI Operations Desk</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700;800&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=20260610-live-agent-01">
   </head>
   <body>
-    <div class="bg-fx" aria-hidden="true"></div>
+    <div class="matrix-backdrop" aria-hidden="true"></div>
+    <div class="scanline" aria-hidden="true"></div>
 
-    <!-- Welcome modal -->
-    <div id="welcomeBackdrop" class="welcome-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="welcomeTitle">
-      <div class="welcome-modal">
-        <div class="welcome-mark" aria-hidden="true">
-          <svg viewBox="0 0 64 64" width="60" height="60">
-            <defs><linearGradient id="welcomeGrad" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#ff5a3c"/>
-            </linearGradient></defs>
-            <circle cx="32" cy="32" r="28" fill="none" stroke="url(#welcomeGrad)" stroke-width="2"/>
-            <circle cx="32" cy="32" r="18" fill="none" stroke="url(#welcomeGrad)" stroke-width="1" opacity="0.5"/>
-            <path d="M4 32h56M32 4v56" stroke="url(#welcomeGrad)" stroke-width="1" opacity="0.4"/>
-            <circle cx="32" cy="32" r="6" fill="url(#welcomeGrad)"/>
-          </svg>
-        </div>
-        <p class="welcome-eyebrow"><span class="welcome-led"></span> MATRIX LIVE · AI INTELLIGENCE DESK</p>
-        <h2 id="welcomeTitle">The AI Newsroom, Live</h2>
-        <p class="welcome-sub">A real-time intelligence desk: AI news &amp; video, social pulse, research, markets and global signals — with JARVIS on comms.</p>
-        <ul class="welcome-bullets">
-          <li>Live AI newswire, video, research papers &amp; trending models</li>
-          <li>JARVIS announces breaking stories — ask him anything on the desk</li>
-          <li>Globe zooms to each story's location as it breaks</li>
-        </ul>
-        <button id="welcomeOk" type="button" class="welcome-ok" autofocus>Enter the Desk →</button>
-      </div>
-    </div>
-
-    <!-- In-app webview / story slide-out -->
-    <aside id="webView" class="webview hidden" role="dialog" aria-modal="true" aria-labelledby="webViewTitle">
-      <header class="webview-head">
-        <div class="webview-meta">
-          <span class="webview-source" id="webViewSource">--</span>
-          <h2 id="webViewTitle">--</h2>
-        </div>
-        <div class="webview-actions">
-          <a id="webViewExternal" class="webview-btn" target="_blank" rel="noreferrer">Open ↗</a>
-          <button id="webViewClose" type="button" class="webview-btn webview-close" aria-label="Close">CLOSE ×</button>
-        </div>
-      </header>
-      <div class="webview-body">
-        <div id="webViewStory" class="webview-story hidden"></div>
-        <iframe id="webViewFrame" src="about:blank" sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-popups-to-escape-sandbox" referrerpolicy="no-referrer-when-downgrade"></iframe>
-        <div id="webViewFallback" class="webview-fallback hidden">
-          <h3>This source blocks embedded preview</h3>
-          <p>Some publishers forbid iframe display via security headers. Use “Open ↗” to view it in a new tab.</p>
-        </div>
-      </div>
-    </aside>
-
-    <main class="desk">
-      <!-- ===================== TOP BAR ===================== -->
-      <header class="deck-top">
-        <div class="brand">
-          <span class="brand-glyph" aria-hidden="true">◆</span>
-          <div class="brand-text">
-            <h1>MATRIX<span>LIVE</span></h1>
-            <p>AI Intelligence Desk</p>
+    <main class="ops-shell">
+      <header class="ops-header">
+        <section class="agency-lockup">
+          <div class="seal" aria-hidden="true">
+            <span></span><span></span><span></span>
           </div>
-          <span class="onair"><span class="onair-dot"></span> ON AIR</span>
-        </div>
-
-        <div class="now-strip" aria-label="Latest headline">
-          <span class="now-tag" id="nowTag">LATEST</span>
-          <div class="now-headline" id="nowHeadline">Connecting to the live desk…</div>
-        </div>
-
-        <div class="deck-metrics">
-          <div class="metric"><strong id="mStories" data-count>0</strong><span>Stories</span></div>
-          <div class="metric"><strong id="mAi" data-count>0</strong><span>AI Now</span></div>
-          <div class="metric"><strong id="mSources" data-count>0</strong><span>Sources</span></div>
-          <div class="metric metric-clock"><strong id="headerClock">--:--:--</strong><span>UTC</span></div>
-        </div>
-
-        <div class="deck-controls">
-          <div class="sources-wrap">
-            <button id="sourcesButton" type="button" class="ctl" aria-haspopup="true" aria-expanded="false" title="Map source layers">
-              <span class="ctl-ico">▤</span><span>Sources</span>
-            </button>
-            <div id="sourcesPopover" class="sources-popover hidden" role="menu" aria-label="Source layers">
-              <div class="sources-popover-head">
-                <span>Map Layers</span>
-                <div class="sources-popover-actions">
-                  <button id="allLayersButton" type="button" class="ghost-btn">All</button>
-                  <button id="noneLayersButton" type="button" class="ghost-btn">None</button>
-                </div>
-              </div>
-              <div id="layerControls" class="layer-controls"></div>
-            </div>
+          <div>
+            <p class="eyebrow">CLASSIFIED LIVE OSINT</p>
+            <h1>MATRIX <b>AI INTELLIGENCE</b></h1>
           </div>
-          <button id="soundToggle" type="button" class="ctl" aria-pressed="false"><span class="ctl-ico">♪</span><span>Sound</span></button>
-          <button id="voiceToggle" type="button" class="ctl" aria-pressed="false" title="JARVIS announces breaking stories aloud"><span class="ctl-ico">◉</span><span>JARVIS</span></button>
-          <button id="refreshButton" type="button" class="ctl ctl-primary"><span class="ctl-ico">↻</span><span>Refresh</span></button>
-          <button id="fullscreenButton" type="button" class="ctl" title="Full screen"><span class="ctl-ico">⤢</span></button>
-        </div>
-      </header>
-
-      <!-- ===================== MAIN GRID ===================== -->
-      <section class="deck-grid">
-
-        <!-- LEFT: live activity + global alerts -->
-        <div class="col-left">
-          <aside class="panel col-activity">
-            <div class="panel-head">
-              <span class="ph-title"><span class="live-dot"></span> Live Activity</span>
-              <span class="ph-meta" id="activityMeta">streaming</span>
-            </div>
-            <ol id="activityLog" class="activity-log" aria-live="polite"></ol>
-          </aside>
-
-          <aside class="panel alerts-card">
-            <div class="panel-head">
-              <span class="ph-title"><span class="live-dot live-dot--hot"></span> Global Alerts</span>
-              <span class="ph-meta" id="visibleCount">0</span>
-            </div>
-            <div id="detailPanel" class="detail-panel hidden"></div>
-            <div id="alertFeed" class="alert-feed"></div>
-          </aside>
-        </div>
-
-        <!-- CENTER: AI hero + social pulse + news stream -->
-        <section class="col-stream">
-          <a id="heroStory" class="hero hidden" target="_blank" rel="noreferrer"></a>
-
-          <div class="social-head">
-            <span class="ph-title"><span class="live-dot live-dot--violet"></span> Social Pulse</span>
-            <span class="ph-meta" id="socialMeta">mastodon · lemmy · hn-live</span>
-          </div>
-          <div id="socialStrip" class="social-strip"></div>
-
-          <div class="stream-head">
-            <span class="ph-title" id="railTitle"><span class="live-dot live-dot--hot"></span> AI Newswire</span>
-            <span class="ph-meta" id="newsMeta">--</span>
-          </div>
-          <div id="newsTrack" class="news-stream"></div>
         </section>
 
-        <!-- RIGHT: globe box + cameras + Tesla + signals -->
-        <aside class="col-side">
-          <section class="panel globe-card">
-            <div class="panel-head">
-              <span class="ph-title"><span class="live-dot"></span> Global Activity</span>
-              <span class="ph-meta" id="globeClock">--:--:-- UTC</span>
-            </div>
-            <div class="globe-box">
-              <div id="globe"></div>
-              <div id="eventPopup" class="event-popup hidden" role="status" aria-live="polite"></div>
-              <div id="mapTooltip" class="map-tooltip hidden" role="tooltip"></div>
-              <div class="globe-hud" id="hudSourceCount">--</div>
-            </div>
-          </section>
+        <section class="headline-strip">
+          <span class="pulse-dot"></span>
+          <span id="breakingSource">CONNECTING</span>
+          <strong id="breakingHeadline">Synchronizing AI intelligence sources...</strong>
+        </section>
 
-          <section class="panel cams-card">
-            <div class="panel-head">
-              <span class="ph-title"><span class="live-dot"></span> Live Cameras</span>
-              <span class="ph-meta" id="cameraCount">0 live</span>
-            </div>
-            <div id="cameraGrid" class="camera-grid-side"></div>
-          </section>
+        <section class="top-metrics" aria-label="Live metrics">
+          <div><strong id="metricStories">--</strong><span>AI Reports</span></div>
+          <div><strong id="metricVideos">--</strong><span>Videos</span></div>
+          <div><strong id="metricSources">--</strong><span>Sources</span></div>
+          <div><strong id="metricTsla">--</strong><span id="metricTslaChange">TSLA</span></div>
+          <div><strong id="metricClock">--:--:--</strong><span>UTC</span></div>
+        </section>
 
-          <section class="panel tesla-card">
+        <section class="control-bank" aria-label="Dashboard controls">
+          <button id="refreshNow" class="control-button" type="button">Sync</button>
+          <div class="source-menu">
+            <button id="sourceToggle" class="control-button source-toggle" type="button" aria-expanded="false">Src <span id="sourceBadge">--</span></button>
+            <div id="sourceDropdown" class="source-dropdown hidden" role="menu" aria-label="Live intelligence sources"></div>
+          </div>
+          <button id="voiceToggle" class="control-button" type="button" aria-pressed="true">Voice</button>
+          <label class="slider-control">Rate <input id="refreshRate" type="range" min="10" max="90" value="25"><span id="refreshRateValue">25s</span></label>
+          <label class="slider-control">Motion <input id="motionLevel" type="range" min="0" max="100" value="78"><span id="motionLevelValue">78</span></label>
+          <label class="slider-control">Vol <input id="voiceVolume" type="range" min="0" max="100" value="88"><span id="voiceVolumeValue">88</span></label>
+        </section>
+      </header>
+
+      <section class="ops-grid">
+        <aside class="left-column">
+          <section class="panel jarvis-panel">
             <div class="panel-head">
-              <span class="ph-title"><span class="live-dot live-dot--amber"></span> TSLA · Tesla Inc.</span>
-              <span class="ph-meta" id="tslaState">--</span>
+              <span><i></i> JARVIS SIGNAL</span>
+              <b id="jarvisStatus">Agent online</b>
             </div>
-            <div class="tesla-body">
-              <div class="tesla-quote">
-                <strong id="tslaPrice">--</strong>
-                <span id="tslaChange" class="tesla-change">--</span>
+            <div class="jarvis-hero">
+              <button id="jarvisBlob" class="siri-blob" type="button" aria-label="Ask Jarvis">
+                <span class="blob-core"></span>
+                <span class="blob-layer blob-a"></span>
+                <span class="blob-layer blob-b"></span>
+                <span class="blob-layer blob-c"></span>
+              </button>
+              <div class="jarvis-copy">
+                <p class="eyebrow">UK MALE VOICE CHANNEL</p>
+                <h2>Operational AI Agent</h2>
+                <p>Ask for AI headlines, video releases, source summaries, weather, or to open public sites.</p>
               </div>
-              <canvas id="tslaChart" class="tesla-chart"></canvas>
-              <div class="tesla-range"><span id="tslaLow">L --</span><span id="tslaHigh">H --</span></div>
+            </div>
+            <form id="jarvisForm" class="jarvis-command" autocomplete="off">
+              <input id="jarvisInput" type="text" placeholder="Ask Jarvis: summarize AI releases, weather in Santa Clara, open OpenAI...">
+              <button type="submit">Send</button>
+            </form>
+            <div id="jarvisLog" class="jarvis-log" aria-live="polite"></div>
+          </section>
+
+          <section class="panel signal-panel">
+            <div class="panel-head">
+              <span><i></i> LIVE ACTIVITY</span>
+              <b id="activityCount">0 events</b>
+            </div>
+            <ol id="activityLog" class="activity-log"></ol>
+          </section>
+
+        </aside>
+
+        <section class="center-column">
+          <section class="priority-zone">
+            <div class="section-title">
+              <span>Priority Intelligence Cards</span>
+              <b id="priorityMeta">live</b>
+            </div>
+            <div id="priorityGrid" class="priority-grid"></div>
+          </section>
+
+          <section class="video-zone">
+            <div class="section-title">
+              <span>AI Video Watch</span>
+              <b id="videoMeta">YouTube live scan</b>
+            </div>
+            <div class="video-layout">
+              <article id="videoTheater" class="video-theater"></article>
+              <div id="videoRail" class="video-rail" aria-label="AI video cards"></div>
             </div>
           </section>
 
-          <section class="panel markets-card">
+          <section class="queue-zone">
+            <div class="section-title">
+              <span>Intelligence Queue</span>
+              <b id="queueMeta">updating</b>
+            </div>
+            <div id="newsGrid" class="news-grid"></div>
+          </section>
+        </section>
+
+        <aside class="right-column">
+          <section class="panel radar-panel">
             <div class="panel-head">
-              <span class="ph-title">AI Signals · Markets</span>
-              <span class="ph-meta" id="intelMeta">--</span>
+              <span><i></i> GLOBAL AI RADAR</span>
+              <b id="radarMeta">tracking</b>
             </div>
-            <div class="signals-scroll">
-              <div class="crypto-bar" id="cryptoBar"><div class="crypto-bar-track" id="cryptoBarTrack"></div></div>
-              <div id="intelPanel" class="intel-panel"></div>
+            <div class="radar">
+              <div class="radar-sweep"></div>
+              <div id="radarBlips" class="radar-blips"></div>
+              <div class="radar-core">AI</div>
             </div>
+          </section>
+
+          <section class="panel social-panel">
+            <div class="panel-head">
+              <span><i></i> HUMAN SIGNAL INTERCEPT</span>
+              <b id="socialMeta">english only</b>
+            </div>
+            <div id="socialFeed" class="social-feed"></div>
+          </section>
+
+          <section class="panel research-panel">
+            <div class="panel-head">
+              <span><i></i> RESEARCH / MODEL WATCH</span>
+              <b id="pulseMeta">live</b>
+            </div>
+            <div id="pulseStack" class="pulse-stack"></div>
           </section>
         </aside>
       </section>
 
-      <!-- ===================== BOTTOM TICKER ===================== -->
-      <footer class="deck-ticker">
-        <span class="ticker-flag">BREAKING</span>
-        <div class="ticker-viewport"><div class="ticker-track" id="headlineTickerTrack"></div></div>
-        <div class="ticker-hn"><span class="ticker-hn-label">HN</span><div class="hn-ticker-track" id="hnTickerTrack"></div></div>
-      </footer>
-
-      <!-- breaking popup floats above the ticker -->
-      <div id="breakingPopup" class="breaking-popup hidden" role="alert" aria-live="assertive"></div>
-
-      <!-- ===================== JARVIS ===================== -->
-      <div id="jarvis" class="jarvis">
-        <div id="jarvisPanel" class="jarvis-panel hidden">
-          <div class="jarvis-head">
-            <span class="jarvis-title"><span class="jarvis-ring"></span> J.A.R.V.I.S.</span>
-            <span class="jarvis-sub">Just A Rather Very Intelligent System</span>
-            <button id="jarvisClose" type="button" class="jarvis-x" aria-label="Close">×</button>
-          </div>
-          <div id="jarvisLog" class="jarvis-log" aria-live="polite"></div>
-          <form id="jarvisForm" class="jarvis-form" autocomplete="off">
-            <input id="jarvisInput" type="text" placeholder="Ask JARVIS… (status, news, tesla, bitcoin)">
-            <button id="jarvisMic" type="button" class="jarvis-mic" title="Speak to JARVIS">🎙</button>
-            <button type="submit" class="jarvis-send" title="Send">➤</button>
-          </form>
+      <footer class="ticker-bar">
+        <span>BREAKING AI WIRE</span>
+        <div class="ticker-window">
+          <div id="tickerTrack" class="ticker-track"></div>
         </div>
-        <button id="jarvisOrb" class="jarvis-orb" type="button" title="Talk to JARVIS" aria-label="Open JARVIS">
-          <span class="jarvis-core"></span>
-          <span class="jarvis-orbit"></span>
-        </button>
-      </div>
-
-      <!-- hidden telemetry sinks -->
-      <div class="hidden-sinks" aria-hidden="true">
-        <span id="feedState"></span><span id="sourceCount"></span><span id="activeCount"></span>
-        <span id="lastUpdated"></span><span id="newsTelemetry"></span><span id="aircraftTelemetry"></span>
-        <span id="satelliteTelemetry"></span><span id="cameraTelemetry"></span><span id="weatherTelemetry"></span>
-        <span id="seismicTelemetry"></span><span id="selectedTelemetry"></span><span id="modeTelemetry"></span>
-        <span id="brandSub"></span><span id="statusMeta"></span>
-      </div>
+      </footer>
     </main>
 
-    <script type="importmap">
-      { "imports": { "three": "./vendor/three.module.min.js" } }
-    </script>
-    <script type="module" src="app.js"></script>
+    <aside id="viewer" class="viewer hidden" role="dialog" aria-modal="true">
+      <header>
+        <div>
+          <span id="viewerSource">SOURCE</span>
+          <h2 id="viewerTitle">Preview</h2>
+        </div>
+        <a id="viewerExternal" target="_blank" rel="noreferrer">Open Source</a>
+        <button id="viewerClose" type="button" aria-label="Close">Close</button>
+      </header>
+      <iframe id="viewerFrame" title="Source preview" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
+    </aside>
+
+    <script type="module" src="app.js?v=20260610-live-agent-01"></script>
   </body>
 </html>

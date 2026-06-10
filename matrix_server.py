@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
 import math
 import os
 import random
+import shutil
 import time
 import re
 import subprocess
 import html
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,13 +36,34 @@ news_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 intel_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 videos_ai_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 videos_gaming_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+youtube_channel_id_cache: dict[str, str] = {}
 stock_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 social_cache: dict[str, Any] = {"at": 0.0, "payload": None}
 aipulse_cache: dict[str, Any] = {"at": 0.0, "payload": None}
-VIDEOS_CACHE_TTL_SECONDS = 300  # 5 minute server cache (client polls every 15 min)
+VIDEOS_CACHE_TTL_SECONDS = 90  # keep AI video watch feeling live without hammering YouTube RSS
 STOCK_CACHE_TTL_SECONDS = 60
 SOCIAL_CACHE_TTL_SECONDS = 120
 AIPULSE_CACHE_TTL_SECONDS = 600
+ELEVENLABS_DEFAULT_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # George - UK male
+ELEVENLABS_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+ELEVENLABS_LOCAL_KEY_PATH = os.environ.get(
+    "ELEVENLABS_API_KEY_FILE",
+    "/Users/stevecaudle/Obsidian/Steve-main/ElevenLabs API/Elevenlabs API.md",
+)
+GEMINI_STT_MODEL = os.environ.get("GEMINI_STT_MODEL", "gemini-3.5-flash")
+GEMINI_LOCAL_KEY_PATH = os.environ.get(
+    "GEMINI_API_KEY_FILE",
+    "/Users/stevecaudle/Obsidian/Steve-main/google AI studio/google AI studio API.md",
+)
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+DEEPSEEK_LOCAL_KEY_PATH = os.environ.get(
+    "DEEPSEEK_API_KEY_FILE",
+    "/Users/stevecaudle/Obsidian/Steve-main/DeepSeek/Deepseek API.md",
+)
+OPENAI_TTS_MODEL = os.environ.get("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.environ.get("OPENAI_TTS_VOICE", "onyx")
+OPENAI_LOCAL_KEY_PATH = os.environ.get("OPENAI_API_KEY_FILE", "")
 SATELLITE_IDS = [
     25544, 20580, 25338, 28654, 33591, 25994, 27424, 37849, 43013, 54234,
     39084, 49260, 40697, 42063, 39634, 38771, 43689, 36516, 41866, 41867,
@@ -1374,6 +1398,9 @@ NEWS_FEEDS = [
     ("Hugging Face", "https://huggingface.co/blog/feed.xml", "ai"),
     ("Synced Review", "https://syncedreview.com/feed/", "ai"),
     ("Apple ML", "https://machinelearning.apple.com/rss.xml", "ai"),
+    ("Google AI Blog", "https://blog.google/technology/ai/rss/", "ai"),
+    ("Cohere Blog", "https://cohere.com/blog/rss.xml", "ai"),
+    ("Databricks", "https://www.databricks.com/feed", "ai"),
     # World feeds scanned for EMERGENCY-level breaking ONLY (safety channel).
     # Non-emergency items from these feeds are dropped.
     ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml", "world"),
@@ -1397,14 +1424,24 @@ EMERGENCY_RE = re.compile(
     re.IGNORECASE,
 )
 
+AI_NEWS_RE = re.compile(
+    r"\b(ai|a\.i\.|artificial intelligence|machine learning|ml|llm|large language model|"
+    r"generative|genai|agentic|agents?|openai|chatgpt|gpt|codex|anthropic|claude|"
+    r"gemini|deepmind|deepseek|mistral|cohere|perplexity|hugging\s*face|nvidia|gpu|"
+    r"neural|transformer|diffusion|robotics?|models?|inference|training|fine[-\s]?tuning|"
+    r"datasets?|prompts?)\b",
+    re.IGNORECASE,
+)
+
 
 # Topic filters for video feeds. Anything that doesn't mention these tokens
 # in title or description gets skipped (case-insensitive).
 AI_VIDEO_KEYWORDS = re.compile(
     r"(\ba\.?i\.?\b|artificial intelligence|open\s*ai|openai|codex|agent|agentic|hermes|"
-    r"deepseek|\bmodel|claude|anthropic|chatgpt|gpt|\bllm|llama|mistral|gemini|grok|"
-    r"reasoning|neural|robot|automation|copilot|perplexity|desktop|prompt|nvidia|"
-    r"machine learning|\bml\b|inference|fine-?tun|transformer|diffusion|generative)",
+    r"open\s*claw|deepseek|\bmodel|claude|claude code|anthropic|chatgpt|gpt|\bllm|llama|"
+    r"mistral|gemini|grok|reasoning|neural|robot|automation|copilot|perplexity|desktop|"
+    r"prompt|nvidia|machine learning|\bml\b|inference|fine-?tun|transformer|diffusion|"
+    r"generative|release|launch|breaking|research|tool|developer)",
     re.IGNORECASE,
 )
 # POE2 / Path of Exile 2 only — strictly filtered
@@ -1414,12 +1451,17 @@ GAMING_VIDEO_KEYWORDS = re.compile(
 )
 
 AI_YT_CHANNELS = [
+    ("Anthropic", "@anthropic-ai"),
+    ("Claude", "@claude"),
     ("AI Explained", "UCNJ1Ymd5yFuUPtn21xtRbbw"),
     ("Lex Fridman", "UCSHZKyawb77ixDdsGog4iWA"),
     ("MKBHD", "UCBJycsmduvYEL83R_U4JriQ"),
     ("Matt Wolfe", "UCJIfeSCssxSC_Dhc5s7woww"),
     ("OpenAI", "UCXZCJLdBC09xxGZ6gcdrc6A"),
     ("Google AI", "UCcefcZRL2oaA_uBNeo5UOWg"),
+    ("Google DeepMind", "@googledeepmind"),
+    ("GitHub", "github"),
+    ("Hugging Face", "UCHlNU7kIZhRgSbhHvFoy72w"),
     ("AI Daily Brief", "UC2WmuBuFq6gL08QYG-JjXKw"),
     ("Wes Roth", "UCSv4qL8vmoSH7GaPjuqRiCQ"),
     ("Fireship", "UCMLtBahI5DMrt0NPvDSoIRQ"),
@@ -1440,8 +1482,48 @@ GAMING_YT_CHANNELS = [
 ]
 
 
+def youtube_channel_feed_url(channel_ref: str) -> str | None:
+    ref = (channel_ref or "").strip()
+    if not ref:
+        return None
+    if ref.startswith("UC"):
+        return f"https://www.youtube.com/feeds/videos.xml?channel_id={urllib.parse.quote(ref)}"
+
+    cached = youtube_channel_id_cache.get(ref)
+    if cached:
+        return f"https://www.youtube.com/feeds/videos.xml?channel_id={urllib.parse.quote(cached)}"
+
+    if ref.startswith("http"):
+        page_url = ref
+    elif ref.startswith("/"):
+        page_url = f"https://www.youtube.com{ref}"
+    elif ref.startswith("@"):
+        page_url = f"https://www.youtube.com/{urllib.parse.quote(ref)}"
+    else:
+        page_url = f"https://www.youtube.com/{urllib.parse.quote(ref)}"
+
+    try:
+        page = fetch_text(page_url, timeout=8)
+    except Exception:
+        return None
+
+    patterns = [
+        r'"channelId"\s*:\s*"(UC[a-zA-Z0-9_-]{20,})"',
+        r'"externalId"\s*:\s*"(UC[a-zA-Z0-9_-]{20,})"',
+        r'<meta\s+itemprop="channelId"\s+content="(UC[a-zA-Z0-9_-]{20,})"',
+        r'https://www\.youtube\.com/channel/(UC[a-zA-Z0-9_-]{20,})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page)
+        if match:
+            channel_id = match.group(1)
+            youtube_channel_id_cache[ref] = channel_id
+            return f"https://www.youtube.com/feeds/videos.xml?channel_id={urllib.parse.quote(channel_id)}"
+    return None
+
+
 def fetch_youtube_channel_feed(
-    channel_id: str,
+    channel_ref: str,
     source: str,
     category: str,
     max_age_minutes: int,
@@ -1450,7 +1532,9 @@ def fetch_youtube_channel_feed(
     """Pull a YouTube channel RSS (Atom) feed and return recent videos.
     If keyword_filter is supplied, only videos whose title OR description match the
     pattern are kept (case-insensitive)."""
-    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    url = youtube_channel_feed_url(channel_ref)
+    if not url:
+        return []
     try:
         xml_text = fetch_text(url, timeout=6)
     except Exception:
@@ -1568,6 +1652,752 @@ def strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
     text = html.unescape(text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def looks_english(text: str) -> bool:
+    value = strip_html(text or "")
+    if len(value) < 20:
+        return False
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff]", value):
+        return False
+    letters = re.findall(r"[A-Za-z]", value)
+    if len(letters) < 12:
+        return False
+    non_ascii = sum(1 for ch in value if ord(ch) > 127)
+    if non_ascii / max(len(value), 1) > 0.08:
+        return False
+    common = re.findall(r"\b(the|and|for|with|this|that|from|you|are|new|ai|openai|chatgpt|model|agent|claude)\b", value.lower())
+    return bool(common) or len(letters) / max(len(value), 1) > 0.72
+
+
+def elevenlabs_api_key() -> str:
+    env_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+    if ELEVENLABS_LOCAL_KEY_PATH and os.path.exists(ELEVENLABS_LOCAL_KEY_PATH):
+        try:
+            raw = open(ELEVENLABS_LOCAL_KEY_PATH, "r", encoding="utf-8").read()
+        except OSError:
+            return ""
+        candidates: list[str] = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                line = line.split(":", 1)[1].strip()
+            if "=" in line:
+                line = line.split("=", 1)[1].strip()
+            line = line.strip().strip("`'\"")
+            if line.startswith("sk_"):
+                candidates.append(line)
+        if candidates:
+            return candidates[-1]
+    return ""
+
+
+def gemini_api_key() -> str:
+    env_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+    if GEMINI_LOCAL_KEY_PATH and os.path.exists(GEMINI_LOCAL_KEY_PATH):
+        try:
+            raw = open(GEMINI_LOCAL_KEY_PATH, "r", encoding="utf-8").read()
+        except OSError:
+            return ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("---"):
+                continue
+            if ":" in line:
+                line = line.split(":", 1)[1].strip()
+            if "=" in line:
+                line = line.split("=", 1)[1].strip()
+            if len(line) >= 20:
+                return line.strip().strip("`'\"")
+    return ""
+
+
+def deepseek_api_key() -> str:
+    env_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+    if DEEPSEEK_LOCAL_KEY_PATH and os.path.exists(DEEPSEEK_LOCAL_KEY_PATH):
+        try:
+            raw = open(DEEPSEEK_LOCAL_KEY_PATH, "r", encoding="utf-8").read()
+        except OSError:
+            return ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("---"):
+                continue
+            if ":" in line:
+                line = line.split(":", 1)[1].strip()
+            if "=" in line:
+                line = line.split("=", 1)[1].strip()
+            line = line.strip().strip("`'\"")
+            if len(line) >= 20:
+                return line
+    return ""
+
+
+def openai_api_key() -> str:
+    env_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+    if OPENAI_LOCAL_KEY_PATH and os.path.exists(OPENAI_LOCAL_KEY_PATH):
+        try:
+            raw = open(OPENAI_LOCAL_KEY_PATH, "r", encoding="utf-8").read()
+        except OSError:
+            return ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("---"):
+                continue
+            if ":" in line:
+                line = line.split(":", 1)[1].strip()
+            if "=" in line:
+                line = line.split("=", 1)[1].strip()
+            line = line.strip().strip("`'\"")
+            if line.startswith("sk-"):
+                return line
+    return ""
+
+
+JARVIS_SITE_ALIASES = {
+    "openai": "https://openai.com/news/",
+    "chatgpt": "https://chatgpt.com/",
+    "anthropic": "https://www.anthropic.com/news",
+    "claude": "https://claude.ai/",
+    "hugging face": "https://huggingface.co/models",
+    "huggingface": "https://huggingface.co/models",
+    "github": "https://github.com/",
+    "arxiv": "https://arxiv.org/list/cs.AI/recent",
+    "google ai": "https://blog.google/technology/ai/",
+    "deepmind": "https://deepmind.google/blog/",
+    "perplexity": "https://www.perplexity.ai/",
+    "deepseek": "https://api-docs.deepseek.com/",
+    "youtube": "https://www.youtube.com/results?search_query=ai+news",
+}
+
+
+def safe_http_url(url: str) -> str:
+    value = (url or "").strip()
+    if not value:
+        return ""
+    if not re.match(r"^https?://", value, re.I):
+        value = f"https://{value}"
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return urllib.parse.urlunparse(parsed)
+
+
+def jarvis_open_action(query: str) -> dict[str, str] | None:
+    q = (query or "").lower()
+    if not re.search(r"\b(open|launch|pull up|go to|visit|show me)\b", q):
+        return None
+    for label, url in JARVIS_SITE_ALIASES.items():
+        if label in q:
+            safe = safe_http_url(url)
+            if safe:
+                return {"type": "open_url", "url": safe, "title": label}
+    match = re.search(
+        r"\b(?:open|launch|pull up|go to|visit|show me)\s+((?:https?://)?[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]*)?)",
+        query or "",
+        re.I,
+    )
+    if not match:
+        return None
+    safe = safe_http_url(match.group(1))
+    if not safe:
+        return None
+    return {"type": "open_url", "url": safe, "title": match.group(1)}
+
+
+def jarvis_weather_location(query: str) -> str:
+    match = re.search(
+        r"\b(?:weather|forecast|temperature|temp)\s+(?:in|for|at|near)?\s*([a-zA-Z0-9 .,'-]{2,80})",
+        query or "",
+        re.I,
+    )
+    if not match:
+        return ""
+    location = match.group(1).strip(" .,'-")
+    location = re.sub(r"\b(right now|today|current|currently|please|pls)\b", "", location, flags=re.I).strip(" .,'-")
+    return location[:80]
+
+
+def fetch_current_weather(location: str) -> dict[str, Any]:
+    loc = clean_context_text(location, 120)
+    if not loc:
+        raise RuntimeError("Missing weather location")
+    state_names = {
+        "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
+        "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
+        "HI": "Hawaii", "IA": "Iowa", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
+        "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "MA": "Massachusetts", "MD": "Maryland",
+        "ME": "Maine", "MI": "Michigan", "MN": "Minnesota", "MO": "Missouri", "MS": "Mississippi",
+        "MT": "Montana", "NC": "North Carolina", "ND": "North Dakota", "NE": "Nebraska", "NH": "New Hampshire",
+        "NJ": "New Jersey", "NM": "New Mexico", "NV": "Nevada", "NY": "New York", "OH": "Ohio",
+        "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+        "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VA": "Virginia",
+        "VT": "Vermont", "WA": "Washington", "WI": "Wisconsin", "WV": "West Virginia", "WY": "Wyoming",
+    }
+    state_match = re.search(r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b", loc, re.I)
+    state_code = state_match.group(1).upper() if state_match else ""
+    country_hint = "&countryCode=US" if state_code else ""
+    geocode_name = re.sub(r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b", "", loc, flags=re.I).strip(" ,") if country_hint else loc
+    geocode_url = (
+        "https://geocoding-api.open-meteo.com/v1/search"
+        f"?name={urllib.parse.quote(geocode_name or loc)}&count=5&language=en&format=json{country_hint}"
+    )
+    geo = fetch_json(geocode_url, timeout=10)
+    results = geo.get("results") or []
+    state_name = state_names.get(state_code, "")
+    if state_name:
+        result = next((item for item in results if item.get("admin1") == state_name), None)
+    else:
+        result = None
+    result = result or (results or [None])[0]
+    if not result:
+        raise RuntimeError("Location not found")
+    lat = float(result["latitude"])
+    lon = float(result["longitude"])
+    place = ", ".join(
+        part for part in [
+            result.get("name"),
+            result.get("admin1"),
+            result.get("country_code"),
+        ]
+        if part
+    )
+    if result.get("country_code") == "US":
+        try:
+            point = fetch_json(f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}", timeout=10)
+            hourly_url = ((point.get("properties") or {}).get("forecastHourly") or "").strip()
+            if hourly_url:
+                hourly = fetch_json(hourly_url, timeout=10)
+                period = (((hourly.get("properties") or {}).get("periods") or [None])[0])
+                if period:
+                    return {
+                        "location": place or loc,
+                        "temperature": period.get("temperature"),
+                        "temperature_unit": period.get("temperatureUnit") or "F",
+                        "feels_like": None,
+                        "humidity": ((period.get("relativeHumidity") or {}).get("value")),
+                        "precipitation": ((period.get("probabilityOfPrecipitation") or {}).get("value")),
+                        "precipitation_unit": "%",
+                        "wind_speed": period.get("windSpeed"),
+                        "wind_unit": "",
+                        "wind_direction": period.get("windDirection"),
+                        "condition": period.get("shortForecast"),
+                        "time": period.get("startTime"),
+                        "provider": "Weather.gov",
+                    }
+        except Exception:
+            pass
+    weather_url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,"
+        "weather_code,wind_speed_10m,wind_direction_10m"
+        "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=auto"
+    )
+    data = fetch_json(weather_url, timeout=10)
+    current = data.get("current") or {}
+    units = data.get("current_units") or {}
+    return {
+        "location": place or loc,
+        "temperature": current.get("temperature_2m"),
+        "temperature_unit": units.get("temperature_2m") or "F",
+        "feels_like": current.get("apparent_temperature"),
+        "humidity": current.get("relative_humidity_2m"),
+        "precipitation": current.get("precipitation"),
+        "precipitation_unit": units.get("precipitation") or "in",
+        "wind_speed": current.get("wind_speed_10m"),
+        "wind_unit": units.get("wind_speed_10m") or "mph",
+        "wind_direction": current.get("wind_direction_10m"),
+        "condition": weather_text(current.get("weather_code")),
+        "time": current.get("time"),
+        "provider": "Open-Meteo",
+    }
+
+
+def jarvis_weather_answer(query: str) -> dict[str, Any] | None:
+    location = jarvis_weather_location(query)
+    if not location:
+        return None
+    weather = fetch_current_weather(location)
+    temp = weather.get("temperature")
+    feels = weather.get("feels_like")
+    humidity = weather.get("humidity")
+    wind = weather.get("wind_speed")
+    unit = weather.get("temperature_unit") or "F"
+    answer = (
+        f"Current weather in {weather['location']}: {weather.get('condition') or 'conditions unavailable'}, "
+        f"{round(float(temp)) if temp is not None else 'unknown'}{unit}. "
+    )
+    if feels is not None:
+        answer += f"Feels like {round(float(feels))}{unit}. "
+    if wind is not None:
+        if isinstance(wind, (int, float)):
+            answer += f"Wind {round(float(wind))} {weather.get('wind_unit') or 'mph'}. "
+        else:
+            answer += f"Wind {clean_context_text(wind, 40)}. "
+    if humidity is not None:
+        answer += f"Humidity {round(float(humidity))} percent."
+    return {
+        "answer": answer.strip(),
+        "provider": "open-meteo",
+        "model": "current-weather",
+        "fallback": False,
+        "tool": "weather",
+        "weather": weather,
+    }
+
+
+def clean_context_text(value: Any, limit: int = 520) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit]
+
+
+def compact_jarvis_context(context: Any) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    if isinstance(context.get("metrics"), dict):
+        compact["metrics"] = {
+            clean_context_text(k, 40): clean_context_text(v, 120)
+            for k, v in context["metrics"].items()
+            if isinstance(k, str) and v is not None
+        }
+    fields = {
+        "news": ("title", "source", "summary", "time", "category", "url"),
+        "videos": ("title", "source", "summary", "time", "url"),
+        "social": ("text", "author", "network", "time", "url", "score"),
+        "research": ("title", "source", "summary", "time", "url", "id"),
+        "events": ("title", "source", "summary", "kind", "severity", "time"),
+    }
+    for key, allowed in fields.items():
+        items = context.get(key)
+        if not isinstance(items, list):
+            continue
+        clean_items: list[dict[str, Any]] = []
+        for item in items[:8]:
+            if not isinstance(item, dict):
+                continue
+            clean_item: dict[str, Any] = {}
+            for field in allowed:
+                value = item.get(field)
+                if value is None:
+                    continue
+                if isinstance(value, (int, float)):
+                    clean_item[field] = value
+                else:
+                    clean_item[field] = clean_context_text(value)
+            if clean_item:
+                clean_items.append(clean_item)
+        compact[key] = clean_items
+    if isinstance(context.get("stock"), dict):
+        stock = context["stock"]
+        compact["stock"] = {
+            clean_context_text(k, 40): (v if isinstance(v, (int, float)) else clean_context_text(v, 120))
+            for k, v in stock.items()
+            if isinstance(k, str) and v is not None
+        }
+    if isinstance(context.get("live_lookup"), dict):
+        live = context["live_lookup"]
+        compact_live: dict[str, Any] = {}
+        if isinstance(live.get("stock"), dict):
+            compact_live["stock"] = {
+                clean_context_text(k, 40): (v if isinstance(v, (int, float)) else clean_context_text(v, 160))
+                for k, v in live["stock"].items()
+                if isinstance(k, str) and v is not None and k != "points"
+            }
+        for key in ("market_news", "news_search"):
+            items = live.get(key)
+            if not isinstance(items, list):
+                continue
+            compact_live[key] = [
+                {
+                    field: clean_context_text(item.get(field), 260)
+                    for field in ("title", "source", "summary", "time", "url")
+                    if item.get(field)
+                }
+                for item in items[:6]
+                if isinstance(item, dict)
+            ]
+        if compact_live:
+            compact["live_lookup"] = compact_live
+    return compact
+
+
+def jarvis_fallback_answer(query: str, context: Any, action: dict[str, str] | None = None) -> str:
+    if action:
+        return f"Opening {action.get('title') or 'that site'} inside the desk, sir."
+    q = (query or "").lower()
+    ctx = compact_jarvis_context(context)
+    news = ctx.get("news") or []
+    videos = ctx.get("videos") or []
+    research = ctx.get("research") or []
+    metrics = ctx.get("metrics") or {}
+    if re.search(r"\b(status|report|systems?|how('s| is) (it|everything))\b", q):
+        stories = metrics.get("stories") or str(len(news))
+        sources = metrics.get("sources") or "live"
+        videos_count = metrics.get("videos") or str(len(videos))
+        return f"DeepSeek is reconnecting, sir. Local systems remain online: {stories} stories, {videos_count} AI videos, and {sources} sources in view."
+    if re.search(r"\b(news|headline|latest|happening|brief)\b", q) and news:
+        headlines = [clean_context_text(item.get("title"), 160) for item in news[:3] if item.get("title")]
+        return f"The latest AI wire, sir: {'; '.join(headlines)}."
+    if re.search(r"\b(video|youtube)\b", q) and videos:
+        item = videos[0]
+        return f"The newest AI video on the desk is {item.get('title')} from {item.get('source')}, sir."
+    if re.search(r"\b(research|paper|arxiv|model)\b", q) and research:
+        item = research[0]
+        return f"The research pulse is led by {item.get('title')}, sir."
+    return "DeepSeek is reconnecting, sir. I can still open sites and brief the live dashboard state from local signals."
+
+
+def fetch_deepseek_jarvis(query: str, context: Any, history: Any = None) -> dict[str, Any]:
+    key = deepseek_api_key()
+    if not key:
+        raise RuntimeError("DeepSeek API key is not configured")
+    compact = compact_jarvis_context(context)
+    context_json = json.dumps(compact, ensure_ascii=False)[:15000]
+    system_prompt = (
+        "You are JARVIS for the Matrix AI Intelligence Desk, adapted from the Mark-XL assistant pattern: "
+        "speech or text command in, LLM reasoning, dashboard/tool action, concise spoken answer out. "
+        "You are a calm, extremely capable UK male intelligence-desk agent. Address the operator as sir occasionally, not every sentence. "
+        "Answer the user's actual question first. Use general knowledge when appropriate, and use the provided live dashboard context only when it helps. "
+        "Live lookup context, when present, is fresh tool output for current facts, stocks, and news. Use it directly and mention uncertainty when headlines imply causes rather than prove them. "
+        "Do not say you can only answer dashboard questions. If live lookup context is present, answer current/worldwide questions from it plus your reasoning. "
+        "Keep normal responses under 45 words. Only provide a full desk status when the user explicitly asks for status, report, brief, or rundown. "
+        "For website-opening requests, give a brief confirmation; the server will execute the open action separately."
+    )
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    if isinstance(history, list):
+        for item in history[-8:]:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = clean_context_text(item.get("content"), 1200)
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content})
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Operator command: {clean_context_text(query, 1200)}\n\n"
+            f"Live desk context JSON:\n{context_json}"
+        ),
+    })
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "stream": False,
+        "temperature": 0.25,
+        "max_tokens": 140,
+    }
+    data = deepseek_chat_completion(payload, key)
+    message_payload = ((data.get("choices") or [{}])[0].get("message") or {})
+    message = (message_payload.get("content") or message_payload.get("reasoning_content") or "").strip()
+    if not message:
+        raise RuntimeError("DeepSeek returned an empty response")
+    return {
+        "answer": message,
+        "provider": "deepseek",
+        "model": data.get("model") or DEEPSEEK_MODEL,
+        "fallback": False,
+    }
+
+
+def deepseek_chat_completion(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    url = f"{DEEPSEEK_BASE_URL}/chat/completions"
+    body = json.dumps(payload)
+    cmd = [
+        "curl",
+        "-sS",
+        "--max-time",
+        "28",
+        "-w",
+        "\nHTTP_STATUS:%{http_code}\n",
+        "-X",
+        "POST",
+        url,
+        "-H",
+        f"Authorization: Bearer {key}",
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        "Accept: application/json",
+        "-H",
+        f"User-Agent: {USER_AGENT}",
+        "--data",
+        body,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=32)
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result and result.returncode == 0 and "HTTP_STATUS:" in result.stdout:
+        raw, _, status_text = result.stdout.rpartition("\nHTTP_STATUS:")
+        status = int((status_text.strip() or "0").splitlines()[0])
+        if 200 <= status < 300:
+            return json.loads(raw)
+        raise RuntimeError(f"DeepSeek HTTP {status}: {clean_context_text(raw, 180)}")
+
+    request = urllib.request.Request(
+        url,
+        data=body.encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=18) as response:
+        return json.loads(response.read().decode("utf-8", errors="replace"))
+
+
+def fetch_elevenlabs_tts(text: str) -> bytes:
+    key = elevenlabs_api_key()
+    if not key:
+        raise RuntimeError("ElevenLabs API key is not configured")
+    voice_id = ELEVENLABS_DEFAULT_VOICE_ID.strip() or "JBFqnCBsd6RMkjVDRZzb"
+    url = (
+        "https://api.elevenlabs.io/v1/text-to-speech/"
+        f"{urllib.parse.quote(voice_id)}?output_format=mp3_44100_128"
+    )
+    payload = {
+        "text": text,
+        "model_id": ELEVENLABS_MODEL_ID,
+        "voice_settings": {
+            "stability": 0.58,
+            "similarity_boost": 0.86,
+            "style": 0.18,
+            "use_speaker_boost": True,
+            "speed": 0.96,
+        },
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "xi-api-key": key,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=18) as response:
+        audio = response.read()
+    if not audio:
+        raise RuntimeError("ElevenLabs returned empty audio")
+    return audio
+
+
+def fetch_openai_tts(text: str) -> bytes:
+    key = openai_api_key()
+    if not key:
+        raise RuntimeError("OpenAI API key is not configured")
+    payload = {
+        "model": OPENAI_TTS_MODEL,
+        "voice": OPENAI_TTS_VOICE,
+        "input": text[:1200],
+        "instructions": "Speak as a calm, precise British male intelligence officer. Concise, warm, and steady.",
+        "response_format": "mp3",
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/audio/speech",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=24) as response:
+        audio = response.read()
+    if not audio:
+        raise RuntimeError("OpenAI TTS returned empty audio")
+    return audio
+
+
+def best_macos_uk_voice() -> str:
+    preferred = ("Reed (English (UK))", "Eddy (English (UK))", "Daniel", "Grandpa (English (UK))")
+    try:
+        result = subprocess.run(["say", "-v", "?"], check=True, capture_output=True, text=True, timeout=4)
+        lines = result.stdout.splitlines()
+        for voice in preferred:
+            if any(line.startswith(voice) for line in lines):
+                return voice
+        for line in lines:
+            if "en_GB" in line:
+                return line.split("  ", 1)[0].strip()
+    except Exception:
+        pass
+    return "Daniel"
+
+
+def fetch_macos_tts(text: str) -> bytes:
+    if not shutil.which("say"):
+        raise RuntimeError("macOS say command is not available")
+    voice = best_macos_uk_voice()
+    with tempfile.NamedTemporaryFile(prefix="jarvis-local-", suffix=".m4a", delete=False) as tmp:
+        path = tmp.name
+    try:
+        subprocess.run(
+            ["say", "-v", voice, "-o", path, text[:900]],
+            check=True,
+            capture_output=True,
+            timeout=25,
+        )
+        with open(path, "rb") as handle:
+            audio = handle.read()
+        if not audio:
+            raise RuntimeError("macOS say returned empty audio")
+        return audio
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def multipart_form_body(fields: dict[str, str], file_field: str, filename: str, content_type: str, data: bytes) -> tuple[bytes, str]:
+    boundary = f"----matrix-elevenlabs-{int(time.time() * 1000)}"
+    body = bytearray()
+    for name, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(
+        (
+            f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type or 'application/octet-stream'}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body.extend(data)
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def fetch_elevenlabs_stt(audio: bytes, content_type: str = "audio/webm") -> dict:
+    key = elevenlabs_api_key()
+    if not key:
+        raise RuntimeError("ElevenLabs API key is not configured")
+    if len(audio) < 600:
+        return {"text": ""}
+    ext = "webm"
+    if "mp4" in content_type:
+        ext = "mp4"
+    elif "mpeg" in content_type or "mp3" in content_type:
+        ext = "mp3"
+    fields = {
+        "model_id": "scribe_v2",
+        "language_code": "en",
+        "tag_audio_events": "false",
+        "timestamps_granularity": "none",
+        "diarize": "false",
+        "no_verbatim": "true",
+        "file_format": "other",
+    }
+    body, multipart_type = multipart_form_body(fields, "file", f"jarvis-wake.{ext}", content_type, audio)
+    request = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/speech-to-text",
+        data=body,
+        headers={
+            "xi-api-key": key,
+            "Content-Type": multipart_type,
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=24) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    text = (payload.get("text") or "").strip()
+    return {
+        "text": text,
+        "language_code": payload.get("language_code"),
+        "language_probability": payload.get("language_probability"),
+    }
+
+
+def fetch_gemini_stt(audio: bytes, content_type: str = "audio/webm") -> dict:
+    key = gemini_api_key()
+    if not key:
+        raise RuntimeError("Gemini API key is not configured")
+    if len(audio) < 600:
+        return {"text": ""}
+    prompt = (
+        "Transcribe this short microphone clip for a dashboard wake-command system. "
+        "Return only the spoken words. If no clear speech is present, return an empty string. "
+        "Important wake words are Jarvis, Otto, and Auto."
+    )
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {
+                    "inlineData": {
+                        "mimeType": content_type or "application/octet-stream",
+                        "data": base64.b64encode(audio).decode("ascii"),
+                    }
+                },
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 64,
+        },
+    }
+    models = []
+    for model in (GEMINI_STT_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"):
+        if model and model not in models:
+            models.append(model)
+    last_error: Exception | None = None
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model)}:generateContent"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "x-goog-api-key": key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=24) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+            text = " ".join((part.get("text") or "") for part in parts).strip().strip('"')
+            return {"text": text, "provider": "gemini", "model": model}
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise RuntimeError("Gemini transcription failed")
+
+
+def fetch_speech_to_text(audio: bytes, content_type: str = "audio/webm") -> dict:
+    try:
+        payload = fetch_elevenlabs_stt(audio, content_type)
+        payload["provider"] = "elevenlabs"
+        return payload
+    except Exception:
+        return fetch_gemini_stt(audio, content_type)
 
 
 def parse_rss_date(value: str | None) -> str:
@@ -1688,15 +2518,14 @@ def build_news_payload() -> dict[str, Any]:
             xml_text = fetch_text(url, timeout=10)
             parsed = parse_rss(xml_text, source, category, limit=10)
             if category == "ai":
-                kept = parsed  # AI is the focus — keep everything
+                kept = [
+                    item for item in parsed
+                    if AI_NEWS_RE.search(f"{item.get('title','')} {item.get('summary','')}")
+                ]
             elif category in ("world", "us"):
-                # World/US feeds contribute ONLY emergency-level items, re-tagged.
+                # This desk is AI-only. General world/news feeds are monitored
+                # elsewhere and must not leak into the intelligence queue.
                 kept = []
-                for item in parsed:
-                    blob = f"{item.get('title','')} {item.get('summary','')}"
-                    if EMERGENCY_RE.search(blob):
-                        item["category"] = "emergency"
-                        kept.append(item)
             else:
                 kept = []  # any other category dropped entirely
             if kept:
@@ -1936,6 +2765,65 @@ def build_stock_payload() -> dict[str, Any]:
     return payload
 
 
+def fetch_stock_news(symbol: str = "TSLA", company: str = "Tesla", limit: int = 6) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    feeds = [
+        ("Yahoo Finance", f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={urllib.parse.quote(symbol)}&region=US&lang=en-US"),
+        ("Google News", "https://news.google.com/rss/search?"
+         f"q={urllib.parse.quote(company + ' stock OR shares')}&hl=en-US&gl=US&ceid=US:en"),
+    ]
+    for source, url in feeds:
+        try:
+            parsed = parse_rss(fetch_text(url, timeout=8), source, "market", limit=limit)
+        except Exception:
+            continue
+        for item in parsed:
+            title = item.get("title") or ""
+            if title and not any(existing.get("title") == title for existing in items):
+                items.append(item)
+            if len(items) >= limit:
+                return items[:limit]
+    return items[:limit]
+
+
+def fetch_live_news_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
+    search = clean_context_text(query, 180)
+    if not search:
+        return []
+    url = (
+        "https://news.google.com/rss/search?"
+        f"q={urllib.parse.quote(search)}&hl=en-US&gl=US&ceid=US:en"
+    )
+    try:
+        return parse_rss(fetch_text(url, timeout=8), "Google News", "live-search", limit=limit)
+    except Exception:
+        return []
+
+
+def jarvis_market_symbol(query: str) -> tuple[str, str] | None:
+    q = (query or "").lower()
+    if re.search(r"\b(tsla|tesla)\b", q):
+        return ("TSLA", "Tesla")
+    return None
+
+
+def build_jarvis_live_lookup(query: str) -> dict[str, Any]:
+    q = query or ""
+    lookup: dict[str, Any] = {}
+    market = jarvis_market_symbol(q)
+    if market and re.search(r"\b(stock|share|shares|price|market|drop|dropped|down|fall|fell|rally|up|why)\b", q, re.I):
+        symbol, company = market
+        if symbol == "TSLA":
+            lookup["stock"] = build_stock_payload()
+        lookup["market_news"] = fetch_stock_news(symbol, company)
+    if re.search(r"\b(today|current|currently|latest|recent|now|why|what happened|worldwide|search|look up|news)\b", q, re.I):
+        search_query = q
+        if market:
+            search_query = f"{market[1]} stock why today"
+        lookup["news_search"] = fetch_live_news_search(search_query)
+    return lookup
+
+
 def build_social_payload() -> dict[str, Any]:
     """Live AI social pulse from free, key-less networks:
     Mastodon hashtag timelines + Lemmy communities + Hacker News (Algolia,
@@ -1953,7 +2841,7 @@ def build_social_payload() -> dict[str, Any]:
             posts = json.loads(fetch_text(f"https://mastodon.social/api/v1/timelines/tag/{tag}?limit=10", timeout=7))
             for p in posts:
                 text = strip_html(p.get("content") or "")
-                if len(text) < 30:
+                if not looks_english(text):
                     continue
                 items.append({
                     "id": f"mast-{p.get('id')}",
@@ -1978,6 +2866,8 @@ def build_social_payload() -> dict[str, Any]:
             # Keep AI-relevant tech posts only
             if not re.search(r"\b(ai|artificial intelligence|openai|chatgpt|llm|anthropic|claude|gemini|deepseek|nvidia|robot|model)\b", blob):
                 continue
+            if not looks_english(title):
+                continue
             items.append({
                 "id": f"lemmy-{post.get('id')}",
                 "network": "lemmy",
@@ -1995,7 +2885,7 @@ def build_social_payload() -> dict[str, Any]:
         data = json.loads(fetch_text("https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=15", timeout=8))
         for h in data.get("hits", []):
             title = h.get("title") or ""
-            if not title:
+            if not looks_english(title):
                 continue
             items.append({
                 "id": f"hn-{h.get('objectID')}",
@@ -2100,6 +2990,99 @@ class MatrixHandler(SimpleHTTPRequestHandler):
         if not self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def do_POST(self) -> None:
+        if self.path.startswith("/api/jarvis"):
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length <= 0:
+                self.send_error(400, "Missing request body")
+                return
+            if length > 256 * 1024:
+                self.send_error(413, "Request too large")
+                return
+            try:
+                raw = self.rfile.read(length).decode("utf-8", errors="replace")
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON")
+                return
+            if not isinstance(data, dict):
+                self.send_error(400, "Invalid request")
+                return
+            query = clean_context_text(data.get("query"), 1200)
+            if not query:
+                self.send_error(400, "Missing query")
+                return
+            context = data.get("context") if isinstance(data.get("context"), dict) else {}
+            live_lookup = build_jarvis_live_lookup(query)
+            if live_lookup:
+                context = {**context, "live_lookup": live_lookup}
+                if "stock" in live_lookup and "stock" not in context:
+                    context["stock"] = live_lookup["stock"]
+            history = data.get("history") if isinstance(data.get("history"), list) else []
+            action = jarvis_open_action(query)
+            try:
+                payload = jarvis_weather_answer(query) or fetch_deepseek_jarvis(query, context, history)
+                if action:
+                    payload["action"] = action
+                    payload["answer"] = f"Opening {action.get('title') or 'that site'} inside the desk, sir."
+                payload["deepseek_configured"] = True
+            except Exception as exc:
+                payload = {
+                    "answer": jarvis_fallback_answer(query, context, action),
+                    "provider": "local-fallback",
+                    "model": "matrix-jarvis-rules",
+                    "fallback": True,
+                    "action": action,
+                    "deepseek_configured": bool(deepseek_api_key()),
+                    "error": "deepseek_unavailable",
+                    "detail": clean_context_text(str(exc), 240),
+                }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/api/stt"):
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length <= 0:
+                self.send_error(400, "Missing audio")
+                return
+            if length > 8 * 1024 * 1024:
+                self.send_error(413, "Audio too large")
+                return
+            content_type = (self.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
+            audio = self.rfile.read(length)
+            payload: dict[str, Any] = {"error": "stt_failed", "text": ""}
+            status = 502
+            for attempt in range(2):
+                try:
+                    payload = fetch_speech_to_text(audio, content_type)
+                    status = 200
+                    break
+                except Exception:
+                    if attempt == 0:
+                        time.sleep(0.45)
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(404, "Not found")
 
     def do_GET(self) -> None:
         if self.path.startswith("/api/camera-preview"):
@@ -2248,12 +3231,11 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path.startswith("/api/videos/ai"):
-            # Topic-filtered to OpenAI/Codex/AI Agents/Hermes/Models/Deepseek family.
-            # 6-hour window — user wants only fresh-for-the-day AI uploads. The
-            # client renders any video within this window (it uses a 6h TTL for
-            # videos, separate from the 2h news TTL).
+            # Topic-filtered to OpenAI/Codex/Claude/Hermes/AI agents/models.
+            # 24-hour rolling window so the desk has a visible current-day
+            # video watch list instead of hiding slower upload cycles.
             payload = build_videos_payload(
-                AI_YT_CHANNELS, "ai-video", 6 * 60, videos_ai_cache,
+                AI_YT_CHANNELS, "ai-video", 24 * 60, videos_ai_cache,
                 keyword_filter=AI_VIDEO_KEYWORDS,
             )
             body = json.dumps(payload).encode("utf-8")
@@ -2265,17 +3247,84 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.startswith("/api/tts/status"):
+            payload = {
+                "openai": bool(openai_api_key()),
+                "openai_model": OPENAI_TTS_MODEL,
+                "openai_voice": OPENAI_TTS_VOICE,
+                "elevenlabs": bool(elevenlabs_api_key()),
+                "voice": "George",
+                "voice_id": ELEVENLABS_DEFAULT_VOICE_ID,
+                "model": ELEVENLABS_MODEL_ID,
+                "fallback": f"macos-{best_macos_uk_voice()}-local",
+                "deepseek": bool(deepseek_api_key()),
+                "agent_model": DEEPSEEK_MODEL,
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/api/tts"):
-            # Free British-English female TTS via Google Translate's public
-            # voice endpoint. No API key, no signup, reliable. Returns a single
-            # MP3 chunk per call — we split long text into <=190-char segments
-            # and concatenate the MP3s so headlines of any length still play.
+            # Primary: OpenAI TTS when configured, then ElevenLabs, then local UK macOS voice.
             parsed = urllib.parse.urlparse(self.path)
             params = urllib.parse.parse_qs(parsed.query)
             text = (params.get("text", [""])[0] or "").strip()[:800]
             if not text:
                 self.send_error(400, "Missing text")
                 return
+            provider = (params.get("provider", ["jarvis"])[0] or "jarvis").strip().lower()
+            if provider in {"openai", "jarvis"}:
+                try:
+                    audio = fetch_openai_tts(text)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Cache-Control", "public, max-age=300")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("X-TTS-Provider", "openai")
+                    self.send_header("X-TTS-Voice", OPENAI_TTS_VOICE)
+                    self.send_header("Content-Length", str(len(audio)))
+                    self.end_headers()
+                    self.wfile.write(audio)
+                    return
+                except Exception:
+                    if provider == "openai":
+                        self.send_error(502, "OpenAI TTS failed")
+                        return
+            if provider in {"eleven", "elevenlabs", "jarvis"}:
+                try:
+                    audio = fetch_elevenlabs_tts(text)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Cache-Control", "public, max-age=300")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("X-TTS-Provider", "elevenlabs")
+                    self.send_header("X-TTS-Voice", "George")
+                    self.send_header("Content-Length", str(len(audio)))
+                    self.end_headers()
+                    self.wfile.write(audio)
+                    return
+                except Exception:
+                    try:
+                        audio = fetch_macos_tts(text)
+                        voice = best_macos_uk_voice()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "audio/mp4")
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.send_header("X-TTS-Provider", "macos-say")
+                        self.send_header("X-TTS-Voice", voice)
+                        self.send_header("Content-Length", str(len(audio)))
+                        self.end_headers()
+                        self.wfile.write(audio)
+                        return
+                    except Exception:
+                        self.send_error(502, "Jarvis TTS failed")
+                        return
             tld = (params.get("lang", ["en-GB"])[0] or "en-GB").strip()
             if tld not in {"en-GB", "en-US", "en-AU", "en-IN"}:
                 tld = "en-GB"
@@ -2338,6 +3387,7 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "audio/mpeg")
             self.send_header("Cache-Control", "public, max-age=300")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("X-TTS-Provider", "google-translate")
             self.send_header("Content-Length", str(len(audio)))
             self.end_headers()
             self.wfile.write(audio)
