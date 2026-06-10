@@ -127,10 +127,21 @@ const els = {
   brandSub: document.querySelector("#brandSub"),
   breakingPopup: document.querySelector("#breakingPopup"),
   mapTooltip: document.querySelector("#mapTooltip"),
+  // New live-desk elements
+  activityLog: document.querySelector("#activityLog"),
+  activityMeta: document.querySelector("#activityMeta"),
+  heroStory: document.querySelector("#heroStory"),
+  nowHeadline: document.querySelector("#nowHeadline"),
+  nowTag: document.querySelector("#nowTag"),
+  headerClock: document.querySelector("#headerClock"),
+  mStories: document.querySelector("#mStories"),
+  mAi: document.querySelector("#mAi"),
+  mSources: document.querySelector("#mSources"),
+  headlineTickerTrack: document.querySelector("#headlineTickerTrack"),
 };
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x04070d, 6.5, 14);
+scene.fog = new THREE.Fog(0x070a12, 6.5, 14);
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
 camera.position.set(0, 0.5, 5.8);
@@ -648,6 +659,7 @@ function dropNewsFlag(item, isEmergency = false) {
   // Spin the globe so the new flag faces the viewer — the whole point is that
   // the operator SEES it arrive.
   focusGlobeOnLatLon(lat, lon);
+  if (typeof addActivity === "function") addActivity("flag", `Map pin · ${lat.toFixed(1)}, ${lon.toFixed(1)} · ${item.source || ""}`);
 }
 
 // Rotate the globe (about Y) so a given lat/lon faces the camera, and pause
@@ -1372,6 +1384,7 @@ function renderCameras() {
   const signature = liveCameras.map((c) => `${c.id}:${c.embedUrl}`).join("|");
   if (signature === renderedCameraSignature) return;
   renderedCameraSignature = signature;
+  addActivity("camera", `${liveCameras.length} live cameras online`);
 
   els.cameraGrid.innerHTML = liveCameras.map((cam, index) => {
     const isFeatured = index === 0;
@@ -1453,22 +1466,17 @@ function renderFeed() {
  * PAGE 2: YouTube gaming videos from the last 2 hours
  * Cards on both pages are sorted newest-first so the leftmost slot
  * always has the freshest content. */
+function escAttr(s) { return (s || "").replace(/"/g, "&quot;"); }
+
 function videoCardHtml(item, freshSet) {
   const isNew = freshSet && freshSet.has(item.id) ? "is-new" : "";
-  const cls = item.category === "gaming-video" ? "gaming-video" : "ai-video";
   const thumb = item.thumbnail || `https://i.ytimg.com/vi/${item.video_id}/hqdefault.jpg`;
-  // YouTube embed URL plays inline in the webview iframe — videos always embed
   const embedUrl = item.video_id ? `https://www.youtube.com/embed/${item.video_id}?autoplay=1` : (item.url || "");
   return `
-    <a class="video-card ${cls} ${isNew}" data-news-card="true" data-url="${item.url || ""}" data-embed="${embedUrl}" data-source="${(item.source || "").replace(/"/g, "&quot;")}" data-title="${(item.title || "").replace(/"/g, "&quot;")}" href="${item.url || "#"}" target="_blank" rel="noreferrer">
-      <div class="video-thumb">
-        <img src="${thumb}" alt="" loading="lazy">
-        <div class="video-meta-overlay">
-          <span class="video-source-pill">${item.source}</span>
-          <span class="video-time-pill">${relativeTime(item.time)}</span>
-        </div>
-      </div>
-      <div class="video-body">
+    <a class="news-card video-card cat-ai-video ${isNew}" data-news-card="true" data-url="${item.url || ""}" data-embed="${embedUrl}" data-source="${escAttr(item.source)}" data-title="${escAttr(item.title)}" href="${item.url || "#"}" target="_blank" rel="noreferrer">
+      <div class="news-card-thumb"><img src="${thumb}" alt="" loading="lazy"></div>
+      <div class="news-card-body">
+        <div class="news-card-meta"><span>▶ ${item.source}</span><span class="news-time">${relativeTime(item.time)}</span></div>
         <h3>${item.title}</h3>
         <p>${item.summary || ""}</p>
       </div>
@@ -1480,15 +1488,13 @@ function newsCardHtml(item) {
   const isNew = state.freshNewsIds.has(item.id) ? "is-new" : "";
   const noImage = item.thumbnail ? "" : "no-image";
   const thumb = item.thumbnail
-    ? `<div class="news-card-thumb"><img src="${item.thumbnail}" alt="" loading="lazy" onerror="this.parentNode.parentNode.classList.add('no-image'); this.parentNode.remove();"></div>`
+    ? `<div class="news-card-thumb"><img src="${item.thumbnail}" alt="" loading="lazy" onerror="this.closest('.news-card').classList.add('no-image'); this.parentNode.remove();"></div>`
     : "";
-  // ✓ badge if this story was already announced as breaking (so the operator
-  // can see the system tracked it and won't re-announce it).
   const announced = state.announcedNewsIds.has(item.id)
     ? `<span class="news-played" title="Announced — won't repeat">✓</span>`
     : "";
   return `
-    <a class="news-card cat-${item.category || "world"} ${noImage} ${isNew}" data-news-card="true" data-url="${item.url || ""}" data-source="${(item.source || "").replace(/"/g, "&quot;")}" data-title="${(item.title || "").replace(/"/g, "&quot;")}" href="${item.url || "#"}" target="_blank" rel="noreferrer">
+    <a class="news-card cat-${item.category || "world"} ${noImage} ${isNew}" data-news-card="true" data-url="${item.url || ""}" data-source="${escAttr(item.source)}" data-title="${escAttr(item.title)}" href="${item.url || "#"}" target="_blank" rel="noreferrer">
       ${thumb}
       <div class="news-card-body">
         <div class="news-card-meta">
@@ -1500,6 +1506,43 @@ function newsCardHtml(item) {
       </div>
     </a>
   `;
+}
+
+/* === Hero (featured top story) === */
+function renderHero(item) {
+  if (!els.heroStory) return;
+  if (!item) { els.heroStory.classList.add("hidden"); return; }
+  const isVideo = !!item._isVideo;
+  const img = item.thumbnail || (item.video_id ? `https://i.ytimg.com/vi/${item.video_id}/hqdefault.jpg` : "");
+  const isEmergency = item.category === "emergency";
+  const badge = isEmergency
+    ? `<span class="hero-badge">● EMERGENCY</span>`
+    : `<span class="hero-badge ai">● ${isVideo ? "AI VIDEO" : "AI BREAKING"}</span>`;
+  const embedUrl = isVideo && item.video_id ? `https://www.youtube.com/embed/${item.video_id}?autoplay=1` : "";
+  els.heroStory.classList.remove("hidden");
+  els.heroStory.href = item.url || "#";
+  els.heroStory.dataset.newsCard = "true";
+  els.heroStory.dataset.url = item.url || "";
+  els.heroStory.dataset.embed = embedUrl;
+  els.heroStory.dataset.source = item.source || "";
+  els.heroStory.dataset.title = item.title || "";
+  els.heroStory.innerHTML = `
+    ${img ? `<div class="hero-img" style="background-image:url('${img}')"></div>` : ""}
+    <div class="hero-shade"></div>
+    <div class="hero-body">
+      <div class="hero-row">${badge}<span class="hero-src">${item.source || ""}</span><span class="hero-time">${relativeTime(item.time)} ago</span></div>
+      <h2>${item.title || ""}</h2>
+      <p>${item.summary || ""}</p>
+    </div>`;
+}
+
+/* === Bottom headline ticker === */
+function renderHeadlineTicker(items) {
+  if (!els.headlineTickerTrack) return;
+  const top = items.slice(0, 18);
+  if (!top.length) return;
+  const html = top.map((i) => `<span class="ticker-item"><b>${(i.source || "").toUpperCase()}</b>${i.title}</span>`).join("");
+  els.headlineTickerTrack.innerHTML = html + html; // duplicate for seamless loop
 }
 
 const CARD_MAX_AGE_MS = 2 * 60 * 60 * 1000;       // news: 2-hour rail TTL
@@ -1522,10 +1565,8 @@ let renderedNewsSignature = "";
 
 function renderNews() {
   if (!els.newsTrack) return;
-  if (els.railTitle) els.railTitle.textContent = "AI Newswire";
 
-  // Single merged feed: AI news + emergency news + AI videos (NO POE2/gaming).
-  // News uses a 2h window; AI videos use a 6h window (see isFresh).
+  // Merged feed: AI news + emergency news + AI videos. Newest first.
   const merged = [
     ...state.news,
     ...state.aiVideos.map((v) => ({ ...v, _isVideo: true })),
@@ -1536,36 +1577,80 @@ function renderNews() {
   if (!merged.length) {
     const emptySig = "EMPTY";
     if (renderedNewsSignature !== emptySig) {
-      els.newsTrack.innerHTML = `<div class="rail-empty"><strong>Quiet window</strong>No fresh AI news (2h) or AI videos (6h) right now — polling continues every 25s for news, 15 min for videos.</div>`;
+      els.newsTrack.innerHTML = `<div class="rail-empty"><strong>Standing by…</strong>No fresh AI news in the window yet. The desk polls every 25s — new stories drop in live.</div>`;
       renderedNewsSignature = emptySig;
+      renderHero(null);
     }
-    els.newsMeta.textContent = `0 items`;
+    if (els.newsMeta) els.newsMeta.textContent = `0 live`;
     return;
   }
-  const aiNewsCount = merged.filter((i) => !i._isVideo && i.category === "ai").length;
-  const emergencyCount = merged.filter((i) => !i._isVideo && i.category === "emergency").length;
-  const aiVideoCount = merged.filter((i) => i._isVideo).length;
-  const totalNews = merged.filter((i) => !i._isVideo).length;
-  els.newsMeta.textContent = `${aiNewsCount} AI · ${aiVideoCount} AI video · ${emergencyCount} emergency`;
-  els.newsTelemetry.textContent = `${merged.length} items`;
 
-  // Signature: list of item IDs (rounded to nearest minute so "3m ago" → "4m ago"
-  // does trigger a re-render once per minute, but identical polls don't).
-  const slice = merged.slice(0, 50);
+  const aiCount = merged.filter((i) => i.category === "ai" || i.category === "ai-video").length;
+  const emergencyCount = merged.filter((i) => i.category === "emergency").length;
+  if (els.newsMeta) els.newsMeta.textContent = `${merged.length} live · ${emergencyCount} emergency`;
+  if (els.newsTelemetry) els.newsTelemetry.textContent = `${merged.length} items`;
+
+  // Animated counters
+  setCounter(els.mStories, merged.length);
+  setCounter(els.mAi, aiCount);
+
+  // Top headline strip
+  if (els.nowHeadline) els.nowHeadline.textContent = merged[0].title;
+  if (els.nowTag) els.nowTag.textContent = merged[0].category === "emergency" ? "EMERGENCY" : "LATEST";
+
+  // Signature so identical polls don't rebuild the DOM
+  const slice = merged.slice(0, 40);
   const minuteBucket = Math.floor(Date.now() / 60000);
   const freshTag = `${state.freshNewsIds.size}:${state.freshVideoIds.size}`;
   const sig = `${minuteBucket}|${freshTag}|` + slice.map((i) => i.id).join(",");
   if (sig === renderedNewsSignature) return;
   renderedNewsSignature = sig;
 
-  els.newsTrack.innerHTML = slice.map((item) => {
+  // Hero = newest; stream = the rest
+  renderHero(merged[0]);
+  els.newsTrack.innerHTML = slice.slice(1).map((item) => {
     if (item._isVideo) return videoCardHtml(item, state.freshVideoIds);
     return newsCardHtml(item);
   }).join("");
   bindCardClicks();
+  renderHeadlineTicker(merged);
+
   if ((state.freshNewsIds.size > 0 || state.freshVideoIds.size > 0) && els.newsTrack.scrollTo) {
-    els.newsTrack.scrollTo({ left: 0, behavior: "smooth" });
+    els.newsTrack.scrollTo({ top: 0, behavior: "smooth" });
   }
+}
+
+/* === Live activity log === */
+const ACTIVITY_TAGS = { news: "NEWS", ai: "AI", video: "VIDEO", breaking: "BREAK", camera: "CAM", market: "MKT", flag: "FLAG", sync: "SYNC" };
+let activityCount = 0;
+function addActivity(kind, msg) {
+  if (!els.activityLog || !msg) return;
+  const li = document.createElement("li");
+  li.className = `activity-item k-${kind}`;
+  const t = new Date();
+  const ts = `${String(t.getUTCHours()).padStart(2, "0")}:${String(t.getUTCMinutes()).padStart(2, "0")}:${String(t.getUTCSeconds()).padStart(2, "0")}`;
+  li.innerHTML = `<span class="at">${ts}</span><span class="tag">${ACTIVITY_TAGS[kind] || kind.toUpperCase()}</span><span class="msg"></span>`;
+  li.querySelector(".msg").textContent = msg;
+  els.activityLog.prepend(li);
+  activityCount += 1;
+  while (els.activityLog.children.length > 60) els.activityLog.lastChild.remove();
+  if (els.activityMeta) els.activityMeta.textContent = `${activityCount} events`;
+}
+
+/* === Animated number counters === */
+function setCounter(el, target) {
+  if (!el) return;
+  const cur = parseInt(el.textContent.replace(/\D/g, ""), 10) || 0;
+  if (cur === target) return;
+  const step = Math.max(1, Math.ceil(Math.abs(target - cur) / 12));
+  let v = cur;
+  const tick = () => {
+    v += target > v ? step : -step;
+    if ((step > 0 && v >= target) || (target < cur && v <= target)) v = target;
+    el.textContent = v;
+    if (v !== target) requestAnimationFrame(tick);
+  };
+  tick();
 }
 
 function bindCardClicks() {
@@ -1589,35 +1674,10 @@ function bindCardClicks() {
 let newsTickerHovered = false;
 let newsTickerTimer = null;
 
-function newsTickerStep() {
-  if (newsTickerHovered) return;
-  if (!state.news.length) return;
-  const track = els.newsTrack;
-  if (!track) return;
-  const max = track.scrollWidth - track.clientWidth;
-  if (max <= 0) return;
-  const firstCard = track.querySelector(".news-card, .video-card");
-  if (!firstCard) return;
-  const cs = window.getComputedStyle(track);
-  const gap = parseFloat(cs.columnGap || cs.gap || "10") || 10;
-  const step = firstCard.offsetWidth + gap;
-  let target = track.scrollLeft + step;
-  if (target >= max - 4) target = 0; // wrap back so newest is shown again
-  track.scrollTo({ left: target, behavior: "smooth" });
-}
-
-// (Re)arm the auto-scroll timer at the current state.newsScrollMs interval.
-function armNewsTicker() {
-  if (newsTickerTimer) clearInterval(newsTickerTimer);
-  newsTickerTimer = setInterval(newsTickerStep, state.newsScrollMs);
-}
-
-function startNewsTicker() {
-  if (!els.newsTrack) return;
-  els.newsTrack.addEventListener("pointerenter", () => { newsTickerHovered = true; });
-  els.newsTrack.addEventListener("pointerleave", () => { newsTickerHovered = false; });
-  armNewsTicker();
-}
+// The news stream is now a VERTICAL feed (newest at top) — no horizontal
+// step-scroll. These are kept as harmless no-ops so older call sites don't break.
+function armNewsTicker() { /* vertical stream: no auto-scroll */ }
+function startNewsTicker() { /* no-op */ }
 
 /* === Breaking news popup + queue ===
  *
@@ -1685,9 +1745,12 @@ function detectBreakingNews(items) {
     items.forEach((item) => state.playedNewsIds.add(item.id));
     persistPlayedNews();
     state.news = items;
-    // BUT do plant a few flags right away so the globe immediately shows AI
-    // news at its locations (the popup box is suppressed on first load; the
-    // flags are not). Stagger them so the focus-spin doesn't whip around.
+    // Seed the live activity log with the most recent stories so it isn't empty
+    items.slice(0, 12).reverse().forEach((item) => {
+      const k = item.category === "emergency" ? "breaking" : "ai";
+      addActivity(k, `${item.source}: ${item.title}`);
+    });
+    // Plant a few flags right away so the globe immediately shows AI news.
     const recentAi = items
       .filter((i) => i.category === "ai" || i.category === "emergency")
       .slice(0, 4);
@@ -1701,14 +1764,12 @@ function detectBreakingNews(items) {
   // been played before (this page-load or any previous one).
   const incoming = items.filter((item) => !state.playedNewsIds.has(item.id));
   if (incoming.length) {
-    // Mark played immediately at queue-time so even if the tab closes before
-    // the popup shows, it can never re-announce on the next load.
     incoming.forEach((item) => state.playedNewsIds.add(item.id));
     persistPlayedNews();
     state.pendingNews.push(...incoming);
-    // Plant a flagpole on the globe at each new item's geographic location.
     incoming.forEach((item) => {
       const isEmergency = item.category === "emergency";
+      addActivity(isEmergency ? "breaking" : "ai", `${item.source}: ${item.title}`);
       if (item.category === "ai" || isEmergency) dropNewsFlag(item, isEmergency);
     });
   }
@@ -1888,7 +1949,15 @@ function renderCryptoBar() {
       </div>
     `;
   }).join("");
+  // Log a market line when BTC moves (throttled to avoid spam)
+  const btc = widget.items.find((c) => (c.symbol || "").toUpperCase() === "BTC");
+  if (btc && btc.price !== lastBtcPrice) {
+    lastBtcPrice = btc.price;
+    const ch = Number(btc.change);
+    addActivity("market", `BTC $${formatPrice(btc.price)} ${ch >= 0 ? "▲" : "▼"}${Math.abs(ch).toFixed(2)}%`);
+  }
 }
+let lastBtcPrice = null;
 
 /* === Hacker News ticker === */
 function renderHnTicker() {
@@ -2355,7 +2424,7 @@ function setVoiceEnabled(on) {
   state.voiceEnabled = !!on;
   localStorage.setItem("matrix.voiceEnabled", on ? "1" : "0");
   if (els.voiceToggle) {
-    const span = els.voiceToggle.querySelector("span");
+    const span = els.voiceToggle.querySelector("span:last-child");
     if (span) span.textContent = on ? "Voice On" : "AI Voice";
     els.voiceToggle.classList.toggle("voice-on", on);
     els.voiceToggle.setAttribute("aria-pressed", String(on));
@@ -2484,17 +2553,19 @@ async function loadEvents() {
     + (cameraPayload.sources?.length ?? 0)
     + (newsPayload.sources?.length ?? 0)
     + (intelPayload.sources?.length ?? 0);
-  els.sourceCount.textContent = totalSources;
-  els.hudSourceCount.textContent = `${totalSources} sources · ${state.events.length} signals`;
-  els.brandSub.textContent = `Fusing ${totalSources} open intelligence sources in real time`;
-  els.lastUpdated.textContent = formatTime(payload.updated_at);
-  els.feedState.textContent = modeStatusText(state.mode);
+  if (els.sourceCount) els.sourceCount.textContent = totalSources;
+  if (els.hudSourceCount) els.hudSourceCount.textContent = `${totalSources} src · ${state.events.length} signals`;
+  if (els.brandSub) els.brandSub.textContent = `Fusing ${totalSources} open intelligence sources in real time`;
+  if (els.lastUpdated) els.lastUpdated.textContent = formatTime(payload.updated_at);
+  if (els.feedState) els.feedState.textContent = modeStatusText(state.mode);
+  setCounter(els.mSources, totalSources);
   renderCameras();
   renderNews();
   renderIntel();
   renderAll();
   renderTelemetry();
   processNewAlerts(state.events);
+  addActivity("sync", `Feeds synced · ${totalSources} sources · ${state.events.length} signals`);
 }
 
 function renderTelemetry() {
@@ -2556,12 +2627,12 @@ function resize() {
 }
 
 function tickClock() {
-  if (!els.globeClock) return;
   const now = new Date();
   const hh = String(now.getUTCHours()).padStart(2, "0");
   const mm = String(now.getUTCMinutes()).padStart(2, "0");
   const ss = String(now.getUTCSeconds()).padStart(2, "0");
-  els.globeClock.textContent = `${hh}:${mm}:${ss} UTC`;
+  if (els.globeClock) els.globeClock.textContent = `${hh}:${mm}:${ss} UTC`;
+  if (els.headerClock) els.headerClock.textContent = `${hh}:${mm}:${ss}`;
 }
 
 function animate(time) {
@@ -2695,38 +2766,52 @@ function bindControls() {
   if (els.speedSlower) els.speedSlower.addEventListener("click", () => applySpeed(state.newsScrollMs + 3000));
   if (els.speedFaster) els.speedFaster.addEventListener("click", () => applySpeed(state.newsScrollMs - 3000));
 
+  // Hero featured story → open in webview
+  if (els.heroStory) {
+    els.heroStory.addEventListener("click", (e) => {
+      e.preventDefault();
+      const d = els.heroStory.dataset;
+      if (d.url || d.embed) openWebView({ url: d.embed || d.url, externalUrl: d.url, source: d.source, title: d.title });
+    });
+  }
+
   els.refreshButton.addEventListener("click", () => {
     loadEvents().catch((error) => {
-      els.feedState.textContent = error.message;
+      if (els.feedState) els.feedState.textContent = error.message;
     });
   });
 
   els.fullscreenButton.addEventListener("click", async () => {
     if (!document.fullscreenElement) {
       await document.documentElement.requestFullscreen();
-      els.fullscreenButton.querySelector("span").textContent = "Exit";
+      els.fullscreenButton.title = "Exit full screen";
     } else {
       await document.exitFullscreen();
-      els.fullscreenButton.querySelector("span").textContent = "Full Screen";
+      els.fullscreenButton.title = "Full screen";
     }
     setTimeout(resize, 250);
   });
 
-  els.autoRotateButton.addEventListener("click", () => {
-    state.autoRotate = !state.autoRotate;
-    els.autoRotateButton.querySelector("span").textContent = state.autoRotate ? "Pause Rotate" : "Rotate";
-    els.autoRotateButton.setAttribute("aria-pressed", String(state.autoRotate));
-  });
+  if (els.autoRotateButton) {
+    els.autoRotateButton.addEventListener("click", () => {
+      state.autoRotate = !state.autoRotate;
+      const s = els.autoRotateButton.querySelector("span:last-child");
+      if (s) s.textContent = state.autoRotate ? "Pause Rotate" : "Rotate";
+      els.autoRotateButton.setAttribute("aria-pressed", String(state.autoRotate));
+    });
+  }
 
   // Sound is ON by default; reflect that in the button + chrome state
-  els.soundToggle.querySelector("span").textContent = "Sound On";
+  const soundLabel = els.soundToggle.querySelector("span:last-child");
+  if (soundLabel) soundLabel.textContent = "Sound On";
   els.soundToggle.setAttribute("aria-pressed", "true");
   els.soundToggle.classList.add("sound-on");
   els.soundToggle.addEventListener("click", async () => {
     state.audio ??= new (window.AudioContext || window.webkitAudioContext)();
     try { await state.audio.resume(); } catch (_) {}
     state.soundEnabled = !state.soundEnabled;
-    els.soundToggle.querySelector("span").textContent = state.soundEnabled ? "Sound On" : "Sound Off";
+    const sl = els.soundToggle.querySelector("span:last-child");
+    if (sl) sl.textContent = state.soundEnabled ? "Sound On" : "Sound Off";
     els.soundToggle.setAttribute("aria-pressed", String(state.soundEnabled));
     els.soundToggle.classList.toggle("sound-on", state.soundEnabled);
     if (state.soundEnabled) playAlertSound("breaking-news");
@@ -2841,6 +2926,7 @@ async function pollYouTubeVideos(opts = {}) {
       if (newIds.size > 0) {
         state.freshVideoIds = new Set([...state.freshVideoIds, ...newIds]);
         playAlertSound("video");
+        incoming.filter((v) => newIds.has(v.id)).forEach((v) => addActivity("video", `${v.source}: ${v.title}`));
         setTimeout(() => {
           newIds.forEach((id) => state.freshVideoIds.delete(id));
           renderNews();
