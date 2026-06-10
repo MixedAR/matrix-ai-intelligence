@@ -600,6 +600,14 @@ async function askJarvis(query) {
     const answer = payload.answer || "I am online, sir, but the agent core returned no briefing.";
     addJarvisMessage(answer, "agent");
     els.jarvisStatus.textContent = jarvisProviderLabel(payload.provider, payload.fallback);
+    if (payload.action?.type === "open_url" && payload.action.url) {
+      openViewer({
+        url: payload.action.url,
+        title: payload.action.title || "Opened by Jarvis",
+        source: "JARVIS",
+      });
+      addActivity("JARVIS", `Opened ${payload.action.title || payload.action.url}`);
+    }
     speak(answer, true);
   } catch (_) {
     const answer = "I am having trouble reaching the agent core. The dashboard feeds remain online.";

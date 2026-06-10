@@ -1793,6 +1793,26 @@ def safe_http_url(url: str) -> str:
     return urllib.parse.urlunparse(parsed)
 
 
+def jarvis_open_target(query: str) -> str:
+    text = re.sub(
+        r"\b(?:please|can you|could you|would you|jarvis|otto|auto)\b",
+        " ",
+        query or "",
+        flags=re.I,
+    )
+    match = re.search(
+        r"\b(?:open|launch|pull up|go to|visit|show me)\s+(?:the\s+)?(?:website|webpage|page|site|article|latest article|news|search results|search)?\s*(?:for|about|on)?\s*(.+)$",
+        text,
+        re.I,
+    )
+    if not match:
+        return ""
+    target = re.sub(r"[.?!]+$", "", match.group(1)).strip(" ,")
+    target = re.split(r"\s+\b(?:and|then)\b\s+(?:tell me|explain|summarize|brief me|show)\b", target, maxsplit=1, flags=re.I)[0].strip(" ,")
+    target = re.sub(r"\b(?:inside|in|on)\s+(?:the\s+)?(?:desk|dashboard|app)$", "", target, flags=re.I).strip(" ,")
+    return clean_context_text(target, 160)
+
+
 def jarvis_open_action(query: str) -> dict[str, str] | None:
     q = (query or "").lower()
     if not re.search(r"\b(open|launch|pull up|go to|visit|show me)\b", q):
@@ -1807,12 +1827,19 @@ def jarvis_open_action(query: str) -> dict[str, str] | None:
         query or "",
         re.I,
     )
-    if not match:
+    if match:
+        safe = safe_http_url(match.group(1))
+        if safe:
+            return {"type": "open_url", "url": safe, "title": match.group(1)}
+    target = jarvis_open_target(query)
+    if not target:
         return None
-    safe = safe_http_url(match.group(1))
-    if not safe:
-        return None
-    return {"type": "open_url", "url": safe, "title": match.group(1)}
+    search = target
+    if re.search(r"\b(latest|news|article|breaking|today|current|recent)\b", q):
+        url = "https://news.google.com/search?q=" + urllib.parse.quote(search)
+    else:
+        url = "https://www.google.com/search?q=" + urllib.parse.quote(search)
+    return {"type": "open_url", "url": url, "title": search}
 
 
 def jarvis_weather_location(query: str) -> str:
@@ -2017,7 +2044,7 @@ def compact_jarvis_context(context: Any) -> dict[str, Any]:
                 for k, v in live["stock"].items()
                 if isinstance(k, str) and v is not None and k != "points"
             }
-        for key in ("market_news", "news_search"):
+        for key in ("market_news", "news_search", "web_search"):
             items = live.get(key)
             if not isinstance(items, list):
                 continue
@@ -2080,8 +2107,9 @@ def fetch_deepseek_jarvis(query: str, context: Any, history: Any = None) -> dict
         f"Today's date is {today} UTC. Treat relative dates using this date. "
         "You are a calm, extremely capable UK male intelligence-desk agent. Address the operator as sir occasionally, not every sentence. "
         "Answer the user's actual question first. Use general knowledge when appropriate, and use the provided live dashboard context only when it helps. "
-        "Live lookup context, when present, is fresh tool output for current facts, stocks, and news. Use it directly and mention uncertainty when headlines imply causes rather than prove them. "
+        "Live lookup context, when present, is fresh tool output for current facts, web search, stocks, and news. Use it directly and mention uncertainty when snippets imply causes rather than prove them. "
         "Do not say you can only answer dashboard questions. If live lookup context is present, answer current/worldwide questions from it plus your reasoning. "
+        "If web_search results are present, treat them as external public web context and answer beyond the dashboard. "
         "Keep normal responses under 45 words. Only provide a full desk status when the user explicitly asks for status, report, brief, or rundown. "
         "For website-opening requests, give a brief confirmation; the server will execute the open action separately."
     )
@@ -2106,7 +2134,7 @@ def fetch_deepseek_jarvis(query: str, context: Any, history: Any = None) -> dict
         "messages": messages,
         "stream": False,
         "temperature": 0.25,
-        "max_tokens": 140,
+        "max_tokens": 220,
     }
     data = deepseek_chat_completion(payload, key)
     message_payload = ((data.get("choices") or [{}])[0].get("message") or {})
@@ -2810,6 +2838,58 @@ def fetch_live_news_search(query: str, limit: int = 6) -> list[dict[str, Any]]:
         return []
 
 
+def decode_duckduckgo_url(url: str) -> str:
+    value = html.unescape(url or "").strip()
+    if value.startswith("//"):
+        value = "https:" + value
+    parsed = urllib.parse.urlparse(value)
+    params = urllib.parse.parse_qs(parsed.query)
+    if "uddg" in params and params["uddg"]:
+        return params["uddg"][0]
+    return value
+
+
+def fetch_web_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    search = clean_context_text(query, 180)
+    if not search:
+        return []
+    url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(search)
+    try:
+        raw = fetch_text(url, timeout=9)
+    except Exception:
+        return []
+
+    pattern = re.compile(
+        r"<a(?P<attrs>[^>]*class=['\"]result-link['\"][^>]*)>(?P<title>.*?)</a>"
+        r".*?<td class=['\"]result-snippet['\"]>(?P<snippet>.*?)</td>",
+        re.I | re.S,
+    )
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(raw):
+        title = strip_html(html.unescape(match.group("title")))
+        summary = strip_html(html.unescape(match.group("snippet")))
+        href_match = re.search(r"href=['\"](?P<href>[^'\"]+)['\"]", match.group("attrs"), re.I)
+        if not href_match:
+            continue
+        link = decode_duckduckgo_url(href_match.group("href"))
+        safe = safe_http_url(link)
+        if not title or not safe or safe in seen:
+            continue
+        seen.add(safe)
+        host = urllib.parse.urlparse(safe).netloc.replace("www.", "")
+        items.append({
+            "title": title[:180],
+            "source": host or "Web Search",
+            "summary": summary[:420],
+            "url": safe,
+            "time": datetime.now(timezone.utc).isoformat(),
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
 def merge_news_items(*groups: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2870,6 +2950,28 @@ def jarvis_market_symbol(query: str) -> tuple[str, str] | None:
     return None
 
 
+def jarvis_needs_web_context(query: str) -> bool:
+    q = (query or "").strip()
+    if len(q) < 9:
+        return False
+    if re.search(
+        r"\b(today|current|currently|latest|recent|now|live|breaking|news|search|look up|find|"
+        r"what happened|why did|why is|when is|who won|stock|shares|price|ipo|listing|filed|"
+        r"open|launch|pull up|visit|show me)\b",
+        q,
+        re.I,
+    ):
+        return True
+    return bool(re.search(r"^(who|what|when|where|why|how|which)\b", q, re.I))
+
+
+def jarvis_is_plain_open_command(query: str) -> bool:
+    q = (query or "").strip()
+    if not re.search(r"\b(open|launch|pull up|go to|visit|show me)\b", q, re.I):
+        return False
+    return not re.search(r"\b(and|then|tell me|explain|summarize|why|what|when|where|who|how)\b", q, re.I)
+
+
 def build_jarvis_live_lookup(query: str) -> dict[str, Any]:
     q = query or ""
     lookup: dict[str, Any] = {}
@@ -2899,6 +3001,7 @@ def build_jarvis_live_lookup(query: str) -> dict[str, Any]:
                 fetch_live_news_search(search_query, 6),
             ]
             lookup["news_search"] = merge_news_items(*targeted, limit=10)
+            lookup["web_search"] = fetch_web_search(search_query, 5)
             lookup["date_signals"] = extract_date_signals(lookup["news_search"])
             lookup["current_date"] = datetime.now(timezone.utc).isoformat()
             return lookup
@@ -2906,6 +3009,13 @@ def build_jarvis_live_lookup(query: str) -> dict[str, Any]:
             search_query = f"{company[1]} latest news"
         lookup["news_search"] = fetch_live_news_search(search_query)
         lookup["date_signals"] = extract_date_signals(lookup["news_search"])
+    if jarvis_needs_web_context(q) and "web_search" not in lookup:
+        search_query = jarvis_open_target(q) or q
+        if market:
+            search_query = f"{market[1]} stock why today"
+        elif company and not live_intent:
+            search_query = f"{company[1]} latest information"
+        lookup["web_search"] = fetch_web_search(search_query, 5)
     if lookup:
         lookup["current_date"] = datetime.now(timezone.utc).isoformat()
     return lookup
@@ -3115,7 +3225,8 @@ class MatrixHandler(SimpleHTTPRequestHandler):
                 payload = jarvis_weather_answer(query) or fetch_deepseek_jarvis(query, context, history)
                 if action:
                     payload["action"] = action
-                    payload["answer"] = f"Opening {action.get('title') or 'that site'} inside the desk, sir."
+                    if jarvis_is_plain_open_command(query):
+                        payload["answer"] = f"Opening {action.get('title') or 'that site'} inside the desk, sir."
                 payload["deepseek_configured"] = True
             except Exception as exc:
                 payload = {
