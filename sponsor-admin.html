@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbit Sponsor Engine</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070b13;
+      --panel: rgba(255,255,255,.075);
+      --panel2: rgba(255,255,255,.105);
+      --line: rgba(255,255,255,.14);
+      --text: #f6fbff;
+      --muted: rgba(234,244,255,.68);
+      --cyan: #62f4ff;
+      --mint: #7effbe;
+      --blue: #2378ff;
+      --pink: #ff55b7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 18% 12%, rgba(98,244,255,.18), transparent 32rem),
+        radial-gradient(circle at 86% 8%, rgba(255,85,183,.16), transparent 30rem),
+        linear-gradient(145deg, #050813, #081827 52%, #11122a);
+    }
+    main { width: min(1440px, calc(100vw - 32px)); margin: 0 auto; padding: 34px 0 48px; }
+    header { display: flex; gap: 20px; align-items: end; justify-content: space-between; margin-bottom: 22px; }
+    h1 { margin: 0; font-size: clamp(32px, 5vw, 54px); line-height: .95; letter-spacing: 0; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    p { margin: 0; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 18px; align-items: start; }
+    .panel {
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(255,255,255,.105), rgba(255,255,255,.055));
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 24px 70px rgba(0,0,0,.28);
+    }
+    label { display: grid; gap: 7px; color: var(--muted); font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: .12em; margin-top: 13px; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid rgba(255,255,255,.13);
+      background: rgba(0,0,0,.28);
+      color: var(--text);
+      border-radius: 7px;
+      padding: 11px 12px;
+      font: inherit;
+      outline: none;
+    }
+    textarea { min-height: 108px; resize: vertical; }
+    input:focus, textarea:focus { border-color: rgba(98,244,255,.55); box-shadow: 0 0 0 3px rgba(98,244,255,.09); }
+    .row { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    button {
+      border: 1px solid rgba(255,255,255,.16);
+      background: linear-gradient(135deg, rgba(35,120,255,.92), rgba(43,210,255,.72));
+      color: white;
+      border-radius: 7px;
+      height: 38px;
+      padding: 0 14px;
+      font-weight: 900;
+      cursor: pointer;
+    }
+    button.secondary { background: rgba(255,255,255,.10); }
+    button.danger { background: rgba(255,75,115,.22); }
+    button:disabled { opacity: .45; cursor: wait; }
+    .token { display: grid; grid-template-columns: 1fr auto; gap: 10px; min-width: min(520px, 100%); }
+    .preview {
+      aspect-ratio: 16 / 9;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.15);
+      overflow: hidden;
+      display: grid;
+      place-items: center;
+      background: rgba(0,0,0,.26);
+      margin-top: 12px;
+    }
+    .preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .preview-card {
+      width: 100%; height: 100%; padding: 34px;
+      background:
+        radial-gradient(circle at 78% 18%, rgba(98,244,255,.46), transparent 34%),
+        linear-gradient(145deg, #08111f, #103d66 48%, #7447ff);
+      display: flex; flex-direction: column; justify-content: center;
+    }
+    .eyebrow { color: var(--cyan); font-weight: 950; letter-spacing: .18em; font-size: 12px; text-transform: uppercase; }
+    .preview-card strong { font-size: clamp(30px, 6vw, 52px); line-height: 1; margin-top: 12px; }
+    .preview-card span { color: #dbeaff; font-size: 18px; margin-top: 14px; max-width: 72%; }
+    .campaigns { display: grid; gap: 10px; margin-top: 12px; }
+    .campaign {
+      display: grid; grid-template-columns: 84px 1fr auto; gap: 12px; align-items: center;
+      padding: 10px; border-radius: 8px; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.11);
+    }
+    .campaign img { width: 84px; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; background: #111; }
+    .campaign h3 { margin: 0 0 4px; font-size: 15px; }
+    .campaign small { color: var(--muted); display: block; }
+    .table-panel { margin-top: 18px; }
+    .table-head { display: flex; justify-content: space-between; gap: 18px; align-items: end; margin-bottom: 10px; }
+    .table-head .actions { margin-top: 0; }
+    .table-meta { margin-top: 6px; font-size: 12px; font-weight: 800; color: var(--mint); }
+    .table-wrap { overflow-x: auto; border: 1px solid rgba(255,255,255,.11); border-radius: 8px; margin-top: 12px; }
+    table { width: 100%; min-width: 1220px; border-collapse: collapse; background: rgba(0,0,0,.18); }
+    th, td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,.08); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; background: rgba(255,255,255,.06); }
+    td { font-size: 13px; }
+    tr:hover td { background: rgba(255,255,255,.035); }
+    .thumb { width: 86px; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; background: #111; display: block; }
+    .badge { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 900; }
+    .badge.active { background: rgba(126,255,190,.16); color: var(--mint); }
+    .badge.paused { background: rgba(255,255,255,.10); color: var(--muted); }
+    .metric { font-weight: 900; color: #fff; }
+    .muted { color: var(--muted); }
+    .table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .table-actions button { height: 30px; padding: 0 9px; font-size: 12px; }
+    .status { min-height: 20px; margin-top: 12px; color: var(--mint); font-weight: 800; }
+    @media (max-width: 880px) {
+      header, .grid { grid-template-columns: 1fr; display: grid; }
+      .token, .row { grid-template-columns: 1fr; }
+      .campaign { grid-template-columns: 1fr; }
+      .campaign img { width: 100%; }
+      .table-head { display: grid; align-items: start; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">Orbit private tools</p>
+        <h1>Sponsor Engine</h1>
+        <p>Create rotating sponsor inserts for Orbit’s in-between feed moments.</p>
+      </div>
+      <div class="token">
+        <input id="token" type="password" placeholder="Admin token">
+        <button id="saveToken" class="secondary">Save</button>
+      </div>
+    </header>
+
+    <section class="grid">
+      <form id="campaignForm" class="panel">
+        <h2 id="formTitle">New Sponsored Insert</h2>
+        <input id="campaignId" type="hidden">
+        <div class="row">
+          <label>Sponsor name <input id="sponsorName" required placeholder="Acme AI"></label>
+          <label>Website <input id="websiteUrl" placeholder="https://example.com"></label>
+        </div>
+        <label>Headline <input id="headline" placeholder="This hour is brought to you by Acme AI"></label>
+        <label>Raw copy <textarea id="rawText" required placeholder="Type rough sponsor notes here. Orbit will rewrite it into a professional ad read."></textarea></label>
+        <div class="actions">
+          <button id="rewriteBtn" type="button">Rewrite Copy</button>
+          <button id="previewBtn" class="secondary" type="button">Preview Card</button>
+        </div>
+        <label>Orbit read <textarea id="scriptText" placeholder="Generated sponsor read appears here."></textarea></label>
+        <div class="row">
+          <label>Start date <input id="startAt" type="datetime-local"></label>
+          <label>End date <input id="endAt" type="datetime-local"></label>
+        </div>
+        <div class="row">
+          <label>Play count <input id="impressionGoal" type="number" min="1" value="24"></label>
+          <label>Card image <input id="imageFile" type="file" accept="image/*"></label>
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0;font-size:13px;">
+          <input id="generateCard" type="checkbox" checked style="width:auto;"> Generate a futuristic Orbit sponsor card if no image is uploaded.
+        </label>
+        <div class="actions">
+          <button id="createBtn" type="submit">Create Sponsor Insert</button>
+          <button id="cancelEditBtn" class="secondary" type="button" style="display:none;">Cancel Edit</button>
+          <button id="testNextBtn" class="secondary" type="button">Test Next Card</button>
+        </div>
+        <div id="status" class="status"></div>
+      </form>
+
+      <aside class="panel">
+        <h2>Card Preview</h2>
+        <div id="preview" class="preview">
+          <div class="preview-card">
+            <div class="eyebrow">Sponsored</div>
+            <strong>Orbit Sponsor</strong>
+            <span>This hour is brought to you by your next sponsor.</span>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="table-head">
+        <div>
+          <h2>Campaigns</h2>
+          <p>Manage every sponsor insert, schedule, counter, image, website, and action from one full-width table.</p>
+          <div id="campaignMeta" class="table-meta">Live counter ready.</div>
+        </div>
+        <div class="actions">
+          <button id="refreshCampaignsBtn" class="secondary" type="button">Refresh Table</button>
+          <button id="newCampaignBtn" class="secondary" type="button">New Insert</button>
+        </div>
+      </div>
+      <div id="campaigns" class="campaigns"></div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const state = {
+      token: localStorage.getItem("orbitSponsorToken") || "",
+      campaigns: [],
+      repeatSeconds: 600,
+      autoRefresh: null
+    };
+    $("token").value = state.token;
+
+    function setStatus(text, isError = false) {
+      $("status").textContent = text;
+      $("status").style.color = isError ? "#ff8bad" : "#7effbe";
+    }
+
+    async function api(path, options = {}) {
+      const headers = { ...(options.headers || {}), "X-Orbit-Admin-Token": state.token };
+      if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+      const response = await fetch(path, { ...options, headers });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
+      return response.json();
+    }
+
+    async function bootstrapLocalToken() {
+      try {
+        const response = await fetch("/api/sponsors/local-token", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!data.token) return;
+        state.token = data.token;
+        $("token").value = data.token;
+        localStorage.setItem("orbitSponsorToken", data.token);
+        setStatus("Local admin token loaded.");
+      } catch (error) {
+        // Hosted/private deployments can still use the manual token field.
+      }
+    }
+
+    function localDateToISO(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+    }
+
+    function isoToLocalInput(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function formatDate(value) {
+      if (!value) return "now";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    }
+
+    function campaignStatus(c) {
+      if (!c.is_active) return "paused";
+      if (c.impressions_remaining <= 0) return "complete";
+      const now = Date.now();
+      const start = c.start_at ? new Date(c.start_at).getTime() : 0;
+      const end = c.end_at ? new Date(c.end_at).getTime() : 0;
+      if (start && now < start) return "scheduled";
+      if (end && now > end) return "ended";
+      return "active";
+    }
+
+    function fileToDataURL(file) {
+      return new Promise((resolve, reject) => {
+        if (!file) return resolve("");
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function renderPreview(imageUrl = "") {
+      const name = $("sponsorName").value.trim() || "Orbit Sponsor";
+      const headline = $("headline").value.trim() || `This hour is brought to you by ${name}`;
+      const script = $("scriptText").value.trim() || $("rawText").value.trim() || "Sponsor message preview.";
+      if (imageUrl) {
+        $("preview").innerHTML = `<img alt="Sponsor card preview" src="${imageUrl}">`;
+      } else {
+        $("preview").innerHTML = `<div class="preview-card"><div class="eyebrow">Sponsored</div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(headline || script)}</span></div>`;
+      }
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function shortUrl(value) {
+      return String(value || "").replace(/^https?:\/\//i, "").slice(0, 28);
+    }
+
+    function updateCampaignMeta() {
+      const repeatMinutes = Math.max(1, Math.round((state.repeatSeconds || 600) / 60));
+      $("campaignMeta").textContent = `Live counter refreshed ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}. Same sponsor repeat guard: ${repeatMinutes} min.`;
+    }
+
+    async function loadCampaigns(options = {}) {
+      if (!state.token) return;
+      try {
+        const data = await api("/api/sponsors");
+        state.campaigns = data.campaigns || [];
+        state.repeatSeconds = data.repeat_seconds || state.repeatSeconds;
+        renderCampaignTable();
+        updateCampaignMeta();
+      } catch (error) {
+        if (!options.silent) setStatus(`Could not load campaigns. ${error.message}`, true);
+      }
+    }
+
+    function renderCampaignTable() {
+      if (!state.campaigns.length) {
+        $("campaigns").innerHTML = `<p>No sponsor campaigns yet.</p>`;
+        return;
+      }
+      $("campaigns").innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Card</th>
+                <th>Sponsor</th>
+                <th>Status</th>
+                <th>Schedule</th>
+                <th>Counter</th>
+                <th>Last served</th>
+                <th>Website</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.campaigns.map((c) => {
+                const status = campaignStatus(c);
+                return `
+                  <tr>
+                    <td>${c.image_url ? `<img class="thumb" src="${c.image_url}" alt="">` : `<span class="muted">No image</span>`}</td>
+                    <td>
+                      <strong>${escapeHtml(c.sponsor_name)}</strong>
+                      <div class="muted">${escapeHtml(c.headline || "")}</div>
+                      <div class="muted">${escapeHtml((c.script_text || "").slice(0, 120))}${(c.script_text || "").length > 120 ? "..." : ""}</div>
+                    </td>
+                    <td><span class="badge ${c.is_active ? "active" : "paused"}">${status}</span></td>
+                    <td>
+                      <div><span class="muted">Start:</span> ${formatDate(c.start_at)}</div>
+                      <div><span class="muted">End:</span> ${c.end_at ? formatDate(c.end_at) : "no end"}</div>
+                    </td>
+                    <td>
+                      <div><span class="metric">${c.impressions_served}</span> served</div>
+                      <div><span class="metric">${c.impression_goal}</span> goal</div>
+                      <div><span class="metric">${c.impressions_remaining}</span> left</div>
+                    </td>
+                    <td>${c.last_served_at ? formatDate(c.last_served_at) : "<span class='muted'>never</span>"}</td>
+                    <td>${c.website_url ? `<a href="${escapeHtml(c.website_url)}" target="_blank" rel="noreferrer">${escapeHtml(shortUrl(c.website_url))}</a>` : "<span class='muted'>none</span>"}</td>
+                    <td>
+                      <div class="table-actions">
+                        <button class="secondary" onclick="editCampaign(${c.id})">Edit</button>
+                        <button class="secondary" onclick="toggleCampaign(${c.id}, ${c.is_active ? "false" : "true"})">${c.is_active ? "Stop" : "Start"}</button>
+                        <button class="secondary" onclick="resetCampaign(${c.id})">Reset</button>
+                        <button class="danger" onclick="deleteCampaign(${c.id})">Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    async function toggleCampaign(id, isActive) {
+      const data = await api("/api/sponsors/toggle", { method: "POST", body: JSON.stringify({ id, is_active: isActive }) });
+      renderCampaignsFrom(data);
+    }
+
+    async function resetCampaign(id) {
+      const data = await api("/api/sponsors/reset", { method: "POST", body: JSON.stringify({ id }) });
+      renderCampaignsFrom(data);
+    }
+
+    async function deleteCampaign(id) {
+      if (!confirm("Delete this sponsor campaign?")) return;
+      const data = await api("/api/sponsors/delete", { method: "POST", body: JSON.stringify({ id }) });
+      renderCampaignsFrom(data);
+    }
+
+    function editCampaign(id) {
+      const c = state.campaigns.find((item) => Number(item.id) === Number(id));
+      if (!c) return;
+      $("campaignId").value = c.id;
+      $("sponsorName").value = c.sponsor_name || "";
+      $("websiteUrl").value = c.website_url || "";
+      $("headline").value = c.headline || "";
+      $("rawText").value = c.raw_text || "";
+      $("scriptText").value = c.script_text || "";
+      $("startAt").value = isoToLocalInput(c.start_at);
+      $("endAt").value = isoToLocalInput(c.end_at);
+      $("impressionGoal").value = c.impression_goal || 1;
+      $("generateCard").checked = false;
+      $("imageFile").value = "";
+      $("formTitle").textContent = `Edit ${c.sponsor_name}`;
+      $("createBtn").textContent = "Save Sponsor Insert";
+      $("cancelEditBtn").style.display = "";
+      renderPreview(c.image_url || "");
+      setStatus(`Editing ${c.sponsor_name}.`);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function resetFormMode() {
+      $("campaignForm").reset();
+      $("campaignId").value = "";
+      $("impressionGoal").value = 24;
+      $("generateCard").checked = true;
+      $("formTitle").textContent = "New Sponsored Insert";
+      $("createBtn").textContent = "Create Sponsor Insert";
+      $("cancelEditBtn").style.display = "none";
+      renderPreview();
+    }
+
+    function renderCampaignsFrom(data) {
+      if (data.campaigns) {
+        state.campaigns = data.campaigns;
+        renderCampaignTable();
+      }
+      setStatus("Campaigns updated.");
+    }
+
+    $("saveToken").addEventListener("click", () => {
+      state.token = $("token").value.trim();
+      localStorage.setItem("orbitSponsorToken", state.token);
+      setStatus("Token saved.");
+      loadCampaigns();
+    });
+
+    $("refreshCampaignsBtn").addEventListener("click", loadCampaigns);
+    $("newCampaignBtn").addEventListener("click", resetFormMode);
+    $("cancelEditBtn").addEventListener("click", () => {
+      resetFormMode();
+      setStatus("Edit cancelled.");
+    });
+
+    $("rewriteBtn").addEventListener("click", async () => {
+      $("rewriteBtn").disabled = true;
+      try {
+        const data = await api("/api/sponsors/rewrite", {
+          method: "POST",
+          body: JSON.stringify({ sponsor_name: $("sponsorName").value, raw_text: $("rawText").value })
+        });
+        $("scriptText").value = data.script_text;
+        if (!$("headline").value.trim() && $("sponsorName").value.trim()) {
+          $("headline").value = `This hour is brought to you by ${$("sponsorName").value.trim()}`;
+        }
+        renderPreview();
+        setStatus("Copy rewritten for Orbit.");
+      } catch (error) {
+        setStatus(`Rewrite failed. ${error.message}`, true);
+      } finally {
+        $("rewriteBtn").disabled = false;
+      }
+    });
+
+    $("previewBtn").addEventListener("click", async () => {
+      const file = $("imageFile").files[0];
+      if (file) renderPreview(URL.createObjectURL(file));
+      else renderPreview();
+    });
+
+    $("testNextBtn").addEventListener("click", async () => {
+      try {
+        const data = await fetch("/api/sponsors/next?mark=0").then((r) => r.json());
+        if (!data.item) return setStatus("No sponsor is due right now.");
+        renderPreview(data.item.image_url);
+        setStatus(`Next due: ${data.item.sponsor_name}`);
+      } catch (error) {
+        setStatus(`Could not test next sponsor. ${error.message}`, true);
+      }
+    });
+
+    $("campaignForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      $("createBtn").disabled = true;
+      try {
+        const imageData = await fileToDataURL($("imageFile").files[0]);
+        const campaignId = $("campaignId").value.trim();
+        const payload = {
+          id: campaignId ? Number(campaignId) : undefined,
+          sponsor_name: $("sponsorName").value,
+          website_url: $("websiteUrl").value,
+          headline: $("headline").value,
+          raw_text: $("rawText").value,
+          script_text: $("scriptText").value,
+          start_at: localDateToISO($("startAt").value),
+          end_at: localDateToISO($("endAt").value),
+          impression_goal: Number($("impressionGoal").value || 1),
+          image_data_url: imageData,
+          generate_card: $("generateCard").checked
+        };
+        const endpoint = campaignId ? "/api/sponsors/update" : "/api/sponsors";
+        const data = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
+        if (data.campaigns) {
+          state.campaigns = data.campaigns;
+          renderCampaignTable();
+        }
+        resetFormMode();
+        renderPreview();
+        setStatus(campaignId ? "Sponsor insert saved." : "Sponsor insert created.");
+      } catch (error) {
+        setStatus(`Create failed. ${error.message}`, true);
+      } finally {
+        $("createBtn").disabled = false;
+      }
+    });
+
+    window.toggleCampaign = toggleCampaign;
+    window.resetCampaign = resetCampaign;
+    window.deleteCampaign = deleteCampaign;
+    window.editCampaign = editCampaign;
+    bootstrapLocalToken().then(() => {
+      loadCampaigns();
+      state.autoRefresh = setInterval(() => loadCampaigns({ silent: true }), 5000);
+    });
+  </script>
+</body>
+</html>

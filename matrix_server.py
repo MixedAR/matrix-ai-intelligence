@@ -8,8 +8,10 @@ import math
 import os
 import random
 import shutil
+import sys
 import time
 import re
+import sqlite3
 import subprocess
 import html
 import tempfile
@@ -21,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 PORT = int(os.environ.get("PORT", "8000"))
@@ -44,8 +47,16 @@ VIDEOS_CACHE_TTL_SECONDS = 90  # keep AI video watch feeling live without hammer
 STOCK_CACHE_TTL_SECONDS = 60
 SOCIAL_CACHE_TTL_SECONDS = 120
 AIPULSE_CACHE_TTL_SECONDS = 600
+SPONSOR_DB_PATH = Path(os.environ.get("ORBIT_SPONSOR_DB", "data/orbit_sponsors.sqlite3"))
+SPONSOR_ASSETS_DIR = Path(os.environ.get("ORBIT_SPONSOR_ASSETS_DIR", "data/sponsor_assets"))
+SPONSOR_ADMIN_TOKEN_FILE = Path(os.environ.get("ORBIT_SPONSOR_ADMIN_TOKEN_FILE", "data/sponsor_admin_token.txt"))
+SPONSOR_REPEAT_SECONDS = int(os.environ.get("ORBIT_SPONSOR_REPEAT_SECONDS", "600"))
 ELEVENLABS_DEFAULT_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # George - UK male
 ELEVENLABS_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+ELEVENLABS_ORBIT_KEY_PATH = os.environ.get(
+    "ELEVENLABS_ORBIT_API_KEY_FILE",
+    "/Users/stevecaudle/Obsidian/Steve-main/ElevenLabs API/Orbit API for elevenlabs.md",
+)
 ELEVENLABS_LOCAL_KEY_PATH = os.environ.get(
     "ELEVENLABS_API_KEY_FILE",
     "/Users/stevecaudle/Obsidian/Steve-main/ElevenLabs API/Elevenlabs API.md",
@@ -1439,9 +1450,10 @@ AI_NEWS_RE = re.compile(
 AI_VIDEO_KEYWORDS = re.compile(
     r"(\ba\.?i\.?\b|artificial intelligence|open\s*ai|openai|codex|agent|agentic|hermes|"
     r"open\s*claw|deepseek|\bmodel|claude|claude code|anthropic|chatgpt|gpt|\bllm|llama|"
-    r"mistral|gemini|grok|reasoning|neural|robot|automation|copilot|perplexity|desktop|"
-    r"prompt|nvidia|machine learning|\bml\b|inference|fine-?tun|transformer|diffusion|"
-    r"generative|release|launch|breaking|research|tool|developer)",
+    r"mistral|gemini|grok|kimi|glm|qwen|openrouter|omnigent|rag|knowledge injection|"
+    r"vibe coding|meta-harness|anti\s*gravity|antigravity|reasoning|neural|robot|automation|copilot|perplexity|"
+    r"desktop|prompt|nvidia|machine learning|\bml\b|inference|fine-?tun|transformer|"
+    r"diffusion|generative|release|launch|breaking|research|tool|developer)",
     re.IGNORECASE,
 )
 # POE2 / Path of Exile 2 only — strictly filtered
@@ -1451,6 +1463,11 @@ GAMING_VIDEO_KEYWORDS = re.compile(
 )
 
 AI_YT_CHANNELS = [
+    ("Two Minute Papers", "UCbfYPyITQ-7l4upoX8nvctg"),
+    ("BridgeMind", "UCwaTGE53GLGC3fDClVl_7TA"),
+    ("Cole Medin", "UCMwVTLZIRRUyyVrkjDpn4pA"),
+    ("Mikey Website", "UC0slzYg-gGq_3JLVK__l_FQ"),
+    ("Bijan Bowen", "UCOCahKBCEUuzDJawM7yN1dg"),
     ("Anthropic", "@anthropic-ai"),
     ("Claude", "@claude"),
     ("AI Explained", "UCNJ1Ymd5yFuUPtn21xtRbbw"),
@@ -1488,6 +1505,11 @@ def youtube_channel_feed_url(channel_ref: str) -> str | None:
         return None
     if ref.startswith("UC"):
         return f"https://www.youtube.com/feeds/videos.xml?channel_id={urllib.parse.quote(ref)}"
+    if ref.startswith("search:"):
+        query = ref.split(":", 1)[1].strip()
+        if query:
+            return f"https://www.youtube.com/feeds/videos.xml?search_query={urllib.parse.quote(query)}"
+        return None
 
     cached = youtube_channel_id_cache.get(ref)
     if cached:
@@ -1639,7 +1661,7 @@ def build_videos_payload(
         "sources": sources,
         "errors": errors,
         "max_age_minutes": max_age_minutes,
-        "items": items[:40],
+        "items": items[:80],
     }
     cache["at"] = now
     cache["payload"] = payload
@@ -1670,27 +1692,46 @@ def looks_english(text: str) -> bool:
     return bool(common) or len(letters) / max(len(value), 1) > 0.72
 
 
+def elevenlabs_key_candidates_from_file(path: str) -> list[str]:
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        raw = open(path, "r", encoding="utf-8").read()
+    except OSError:
+        return []
+
+    candidates: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("---"):
+            continue
+        if ":" in line:
+            line = line.split(":", 1)[1].strip()
+        if "=" in line:
+            line = line.split("=", 1)[1].strip()
+        line = line.strip().strip("`'\"")
+        if line.startswith("sk_"):
+            candidates.append(line)
+    return candidates
+
+
+def elevenlabs_api_key_source() -> str:
+    env_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+    if env_key:
+        return "env"
+    if elevenlabs_key_candidates_from_file(ELEVENLABS_ORBIT_KEY_PATH):
+        return "orbit-obsidian"
+    if elevenlabs_key_candidates_from_file(ELEVENLABS_LOCAL_KEY_PATH):
+        return "legacy-obsidian"
+    return "missing"
+
+
 def elevenlabs_api_key() -> str:
     env_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
     if env_key:
         return env_key
-    if ELEVENLABS_LOCAL_KEY_PATH and os.path.exists(ELEVENLABS_LOCAL_KEY_PATH):
-        try:
-            raw = open(ELEVENLABS_LOCAL_KEY_PATH, "r", encoding="utf-8").read()
-        except OSError:
-            return ""
-        candidates: list[str] = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" in line:
-                line = line.split(":", 1)[1].strip()
-            if "=" in line:
-                line = line.split("=", 1)[1].strip()
-            line = line.strip().strip("`'\"")
-            if line.startswith("sk_"):
-                candidates.append(line)
+    for path in (ELEVENLABS_ORBIT_KEY_PATH, ELEVENLABS_LOCAL_KEY_PATH):
+        candidates = elevenlabs_key_candidates_from_file(path)
         if candidates:
             return candidates[-1]
     return ""
@@ -1843,15 +1884,22 @@ def jarvis_open_action(query: str) -> dict[str, str] | None:
 
 
 def jarvis_weather_location(query: str) -> str:
-    match = re.search(
-        r"\b(?:weather|forecast|temperature|temp)\s+(?:in|for|at|near)?\s*([a-zA-Z0-9 .,'-]{2,80})",
-        query or "",
-        re.I,
-    )
-    if not match:
+    q = clean_context_text(query, 180)
+    patterns = [
+        r"\b(?:weather|forecast)\s+(?:temperature|temp|conditions)?\s*(?:in|for|at|near)\s+([a-zA-Z0-9 .,'-]{2,80})",
+        r"\b(?:temperature|temp)\s+(?:in|for|at|near)\s+([a-zA-Z0-9 .,'-]{2,80})",
+        r"\b(?:how hot|how cold|what(?:'s| is) the temperature|what(?:'s| is) the weather)\s+(?:in|for|at|near)\s+([a-zA-Z0-9 .,'-]{2,80})",
+    ]
+    location = ""
+    for pattern in patterns:
+        match = re.search(pattern, q, re.I)
+        if match:
+            location = match.group(1).strip(" .,'-")
+            break
+    if not location:
         return ""
-    location = match.group(1).strip(" .,'-")
-    location = re.sub(r"\b(right now|today|current|currently|please|pls)\b", "", location, flags=re.I).strip(" .,'-")
+    location = re.sub(r"\b(right now|today|current|currently|please|pls|outside|there|now)\b", "", location, flags=re.I).strip(" .,'-")
+    location = re.sub(r"^(?:in|for|at|near)\s+", "", location, flags=re.I).strip(" .,'-")
     return location[:80]
 
 
@@ -1871,16 +1919,35 @@ def fetch_current_weather(location: str) -> dict[str, Any]:
         "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VA": "Virginia",
         "VT": "Vermont", "WA": "Washington", "WI": "Wisconsin", "WV": "West Virginia", "WY": "Wyoming",
     }
+    state_codes_by_name = {value.lower(): key for key, value in state_names.items()}
     state_match = re.search(r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b", loc, re.I)
     state_code = state_match.group(1).upper() if state_match else ""
+    if not state_code:
+        for state_name, code in state_codes_by_name.items():
+            if re.search(rf"\b{re.escape(state_name)}\b", loc, re.I):
+                state_code = code
+                break
     country_hint = "&countryCode=US" if state_code else ""
-    geocode_name = re.sub(r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b", "", loc, flags=re.I).strip(" ,") if country_hint else loc
+    geocode_name = loc
+    if country_hint:
+        geocode_name = re.sub(r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b", "", geocode_name, flags=re.I)
+        state_name_for_code = state_names.get(state_code, "")
+        if state_name_for_code:
+            geocode_name = re.sub(rf"\b{re.escape(state_name_for_code)}\b", "", geocode_name, flags=re.I)
+        geocode_name = geocode_name.strip(" ,")
     geocode_url = (
         "https://geocoding-api.open-meteo.com/v1/search"
         f"?name={urllib.parse.quote(geocode_name or loc)}&count=5&language=en&format=json{country_hint}"
     )
     geo = fetch_json(geocode_url, timeout=10)
     results = geo.get("results") or []
+    if not results and geocode_name != loc:
+        geo = fetch_json(
+            "https://geocoding-api.open-meteo.com/v1/search"
+            f"?name={urllib.parse.quote(loc)}&count=5&language=en&format=json{country_hint}",
+            timeout=10,
+        )
+        results = geo.get("results") or []
     state_name = state_names.get(state_code, "")
     if state_name:
         result = next((item for item in results if item.get("admin1") == state_name), None)
@@ -1989,6 +2056,460 @@ def clean_context_text(value: Any, limit: int = 520) -> str:
     return text[:limit]
 
 
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def parse_iso_datetime(value: Any) -> datetime | None:
+    text = clean_context_text(value, 80)
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def sponsor_admin_token() -> str:
+    env_token = (os.environ.get("ORBIT_SPONSOR_ADMIN_TOKEN") or "").strip()
+    if env_token:
+        return env_token
+    SPONSOR_ADMIN_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if SPONSOR_ADMIN_TOKEN_FILE.exists():
+        token = SPONSOR_ADMIN_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    token = hashlib.sha256(os.urandom(32)).hexdigest()[:32]
+    SPONSOR_ADMIN_TOKEN_FILE.write_text(token, encoding="utf-8")
+    return token
+
+
+def init_sponsor_db() -> None:
+    SPONSOR_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SPONSOR_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(SPONSOR_DB_PATH) as db:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sponsor_campaigns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sponsor_name TEXT NOT NULL,
+                headline TEXT NOT NULL,
+                raw_text TEXT NOT NULL,
+                script_text TEXT NOT NULL,
+                website_url TEXT,
+                image_path TEXT,
+                start_at TEXT,
+                end_at TEXT,
+                impression_goal INTEGER NOT NULL DEFAULT 1,
+                impressions_served INTEGER NOT NULL DEFAULT 0,
+                last_served_at TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sponsor_impressions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                campaign_id INTEGER NOT NULL,
+                served_at TEXT NOT NULL,
+                client TEXT,
+                FOREIGN KEY(campaign_id) REFERENCES sponsor_campaigns(id)
+            )
+            """
+        )
+        db.commit()
+
+
+def sponsor_db_rows(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    init_sponsor_db()
+    with sqlite3.connect(SPONSOR_DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(row) for row in db.execute(query, params).fetchall()]
+
+
+def sponsor_campaign_to_payload(row: dict[str, Any], host_base: str = "") -> dict[str, Any]:
+    image_path = clean_context_text(row.get("image_path"), 320)
+    image_url = ""
+    if image_path:
+        filename = urllib.parse.quote(Path(image_path).name)
+        image_url = f"{host_base}/sponsor-assets/{filename}" if host_base else f"/sponsor-assets/{filename}"
+    goal = int(row.get("impression_goal") or 0)
+    served = int(row.get("impressions_served") or 0)
+    return {
+        "id": row.get("id"),
+        "sponsor_name": row.get("sponsor_name") or "",
+        "headline": row.get("headline") or "",
+        "raw_text": row.get("raw_text") or "",
+        "script_text": row.get("script_text") or "",
+        "website_url": row.get("website_url") or "",
+        "image_url": image_url,
+        "start_at": row.get("start_at") or "",
+        "end_at": row.get("end_at") or "",
+        "impression_goal": goal,
+        "impressions_served": served,
+        "impressions_remaining": max(0, goal - served),
+        "last_served_at": row.get("last_served_at") or "",
+        "is_active": bool(row.get("is_active")),
+        "created_at": row.get("created_at") or "",
+        "updated_at": row.get("updated_at") or "",
+    }
+
+
+def sponsor_campaign_rows(host_base: str = "") -> list[dict[str, Any]]:
+    rows = sponsor_db_rows("SELECT * FROM sponsor_campaigns ORDER BY created_at DESC, id DESC")
+    return [sponsor_campaign_to_payload(row, host_base) for row in rows]
+
+
+def sponsor_public_context(host_base: str = "") -> list[dict[str, Any]]:
+    rows = sponsor_db_rows(
+        """
+        SELECT * FROM sponsor_campaigns
+        ORDER BY is_active DESC, last_served_at DESC, created_at DESC, id DESC
+        """
+    )
+    sponsors: list[dict[str, Any]] = []
+    for row in rows:
+        payload = sponsor_campaign_to_payload(row, host_base)
+        sponsors.append({
+            "id": payload["id"],
+            "sponsor_name": payload["sponsor_name"],
+            "headline": payload["headline"],
+            "description": payload["raw_text"],
+            "orbit_read": payload["script_text"],
+            "website_url": payload["website_url"],
+            "image_url": payload["image_url"],
+            "is_active": payload["is_active"],
+            "start_at": payload["start_at"],
+            "end_at": payload["end_at"],
+            "impressions_remaining": payload["impressions_remaining"],
+        })
+    return sponsors
+
+
+def jarvis_sponsor_answer(query: str, host_base: str = "") -> dict[str, Any] | None:
+    q = (query or "").lower()
+    if not re.search(r"\b(sponsor|sponsored|advertiser|ad\b|advertisement|brought to you|who paid|who's paying|who is paying)\b", q):
+        return None
+    sponsors = sponsor_public_context(host_base)
+    if not sponsors:
+        return {
+            "answer": "We do not have any sponsors loaded in Orbit yet, sir. The sponsor engine is ready, but the sponsor shelf is currently empty.",
+            "provider": "sponsor-db",
+            "model": "orbit-sponsor-knowledge",
+            "fallback": False,
+        }
+
+    active = [item for item in sponsors if item.get("is_active")]
+    candidates = active or sponsors
+    query_key = re.sub(r"[^a-z0-9]+", " ", q).strip()
+
+    def score(item: dict[str, Any]) -> int:
+        name = clean_context_text(item.get("sponsor_name"), 120).lower()
+        headline = clean_context_text(item.get("headline"), 180).lower()
+        website = urllib.parse.urlparse(safe_http_url(item.get("website_url") or "")).netloc.lower().replace("www.", "")
+        score_value = 0
+        for token in re.findall(r"[a-z0-9]{3,}", f"{name} {website}"):
+            if token and token in query_key:
+                score_value += 4
+        for token in re.findall(r"[a-z0-9]{4,}", headline):
+            if token and token in query_key:
+                score_value += 1
+        return score_value
+
+    ranked = sorted(candidates, key=score, reverse=True)
+    selected = ranked[0]
+    if len(candidates) > 1 and score(selected) == 0 and not re.search(r"\b(current|today|now|our|the)\s+sponsors?\b", q):
+        names = ", ".join(clean_context_text(item.get("sponsor_name"), 70) for item in candidates[:5] if item.get("sponsor_name"))
+        return {
+            "answer": f"Orbit currently has these sponsors in the system: {names}. Ask me about one by name and I can give you the useful details, then open their website.",
+            "provider": "sponsor-db",
+            "model": "orbit-sponsor-knowledge",
+            "fallback": False,
+            "sponsors": candidates[:8],
+        }
+
+    name = clean_context_text(selected.get("sponsor_name"), 90) or "this sponsor"
+    headline = clean_context_text(selected.get("headline"), 160)
+    description = clean_context_text(selected.get("description"), 420)
+    orbit_read = clean_context_text(selected.get("orbit_read"), 360)
+    website = safe_http_url(selected.get("website_url") or "")
+    detail = description or orbit_read or headline
+    if detail.lower().startswith("this hour is brought to you by"):
+        detail = re.sub(r"^this hour is brought to you by\s+[^.]+\.?\s*", "", detail, flags=re.I).strip()
+    if not detail:
+        detail = f"{name} is one of Orbit's sponsor inserts."
+    answer = f"{name} is an Orbit sponsor. {detail}"
+    if headline and headline.lower() not in answer.lower():
+        answer += f" Their current sponsor card says: {headline}."
+    if website:
+        answer += " I can open their website for you from the Open button."
+    return {
+        "answer": clean_orbit_spoken_text(answer, 700),
+        "provider": "sponsor-db",
+        "model": "orbit-sponsor-knowledge",
+        "fallback": False,
+        "sponsor": selected,
+        "action": {"type": "open_url", "url": website, "title": name} if website else None,
+    }
+
+
+def sponsor_is_due(row: dict[str, Any], now: datetime) -> bool:
+    if not row.get("is_active"):
+        return False
+    goal = int(row.get("impression_goal") or 0)
+    served = int(row.get("impressions_served") or 0)
+    if goal > 0 and served >= goal:
+        return False
+    start_at = parse_iso_datetime(row.get("start_at"))
+    end_at = parse_iso_datetime(row.get("end_at"))
+    if start_at and now < start_at:
+        return False
+    if end_at and now > end_at:
+        return False
+    last_served_at = parse_iso_datetime(row.get("last_served_at"))
+    if last_served_at and (now - last_served_at).total_seconds() < SPONSOR_REPEAT_SECONDS:
+        return False
+    return True
+
+
+def next_sponsor_campaign(host_base: str, client: str = "", mark: bool = True) -> dict[str, Any] | None:
+    init_sponsor_db()
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(SPONSOR_DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        rows = [dict(row) for row in db.execute("SELECT * FROM sponsor_campaigns WHERE is_active = 1").fetchall()]
+        due = [row for row in rows if sponsor_is_due(row, now)]
+        if not due:
+            return None
+        due.sort(key=lambda row: (int(row.get("impressions_served") or 0), row.get("last_served_at") or "", int(row.get("id") or 0)))
+        selected = due[0]
+        served_at = utc_now_iso()
+        if mark:
+            db.execute(
+                "UPDATE sponsor_campaigns SET impressions_served = impressions_served + 1, last_served_at = ?, updated_at = ? WHERE id = ?",
+                (served_at, served_at, selected["id"]),
+            )
+            db.execute(
+                "INSERT INTO sponsor_impressions (campaign_id, served_at, client) VALUES (?, ?, ?)",
+                (selected["id"], served_at, clean_context_text(client, 120)),
+            )
+            db.commit()
+            selected["impressions_served"] = int(selected.get("impressions_served") or 0) + 1
+            selected["last_served_at"] = served_at
+            selected["updated_at"] = served_at
+        payload = sponsor_campaign_to_payload(selected, host_base)
+        payload["signal"] = {
+            "id": f"sponsor-{payload['id']}-{int(now.timestamp())}",
+            "source": "Sponsored",
+            "title": payload["headline"] or f"This hour is brought to you by {payload['sponsor_name']}",
+            "summary": payload["script_text"],
+            "url": payload["website_url"],
+            "thumbnail": payload["image_url"],
+            "time": served_at,
+        }
+        return payload
+
+
+def save_sponsor_image(data_url: str, campaign_id_hint: str) -> str:
+    match = re.match(r"^data:(image/(?:png|jpeg|jpg|webp|gif|svg\+xml));base64,(.+)$", data_url or "", re.I | re.S)
+    if not match:
+        return ""
+    mime = match.group(1).lower()
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/svg+xml": ".svg"}.get(mime, ".png")
+    try:
+        raw = base64.b64decode(match.group(2), validate=False)
+    except Exception:
+        return ""
+    if not raw or len(raw) > 8 * 1024 * 1024:
+        return ""
+    SPONSOR_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_hint = re.sub(r"[^a-zA-Z0-9_-]+", "-", campaign_id_hint).strip("-") or "sponsor"
+    path = SPONSOR_ASSETS_DIR / f"{safe_hint}-{int(time.time())}{ext}"
+    path.write_bytes(raw)
+    return str(path)
+
+
+def sponsor_generated_card_svg(name: str, headline: str, script: str) -> bytes:
+    safe_name = html.escape(clean_context_text(name, 80) or "Orbit Sponsor")
+    safe_headline = html.escape(clean_context_text(headline, 120) or f"Sponsored by {safe_name}")
+    safe_script = html.escape(clean_context_text(script, 170))
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#08111f"/><stop offset=".42" stop-color="#103d66"/><stop offset="1" stop-color="#7447ff"/></linearGradient><radialGradient id="glow" cx="78%" cy="22%" r="60%"><stop offset="0" stop-color="#66f5ff" stop-opacity=".9"/><stop offset=".45" stop-color="#49a8ff" stop-opacity=".18"/><stop offset="1" stop-color="#000000" stop-opacity="0"/></radialGradient></defs>
+<rect width="1200" height="675" rx="44" fill="#050914"/><rect x="18" y="18" width="1164" height="639" rx="34" fill="url(#bg)"/><rect x="18" y="18" width="1164" height="639" rx="34" fill="url(#glow)"/>
+<path d="M742 102c129 26 229 131 246 263 11 85-7 159-47 221H578c93-61 150-155 145-257-4-90-50-168-125-224 43-10 91-12 144-3z" fill="#ffffff" opacity=".08"/><circle cx="925" cy="194" r="78" fill="#63f7ff" opacity=".16"/><circle cx="1018" cy="302" r="150" fill="#ff4fb8" opacity=".11"/>
+<g transform="translate(78 80)"><rect x="0" y="0" width="246" height="46" rx="14" fill="#ffffff" opacity=".12"/><text x="123" y="31" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="900" fill="#eaffff" letter-spacing="3">SPONSORED</text></g>
+<text x="78" y="236" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#8dfcff" letter-spacing="5">THIS HOUR IS BROUGHT TO YOU BY</text><text x="78" y="340" font-family="Inter, Arial, sans-serif" font-size="78" font-weight="950" fill="#ffffff">{safe_name}</text><text x="78" y="424" font-family="Inter, Arial, sans-serif" font-size="38" font-weight="850" fill="#dbeaff">{safe_headline}</text>
+<foreignObject x="80" y="462" width="700" height="120"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,Arial,sans-serif;color:#d7e8ff;font-size:27px;line-height:1.32;font-weight:650;">{safe_script}</div></foreignObject>
+<g transform="translate(922 448)"><circle cx="82" cy="82" r="82" fill="#05101f" opacity=".55"/><path d="M82 22l16 40 43 4-33 27 10 42-36-23-36 23 10-42-33-27 43-4z" fill="#7dfcff"/></g></svg>""".encode("utf-8")
+
+
+def save_generated_sponsor_card(name: str, headline: str, script: str, campaign_id_hint: str) -> str:
+    SPONSOR_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_hint = re.sub(r"[^a-zA-Z0-9_-]+", "-", campaign_id_hint).strip("-") or "sponsor"
+    path = SPONSOR_ASSETS_DIR / f"{safe_hint}-{int(time.time())}.svg"
+    path.write_bytes(sponsor_generated_card_svg(name, headline, script))
+    return str(path)
+
+
+def rewrite_sponsor_script(name: str, raw_text: str) -> str:
+    name = clean_context_text(name, 90) or "our sponsor"
+    raw_text = clean_context_text(raw_text, 900)
+    if not raw_text:
+        return f"This hour is brought to you by {name}, supporting the Orbit AI news stream."
+    key = deepseek_api_key()
+    if key:
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": "Rewrite sponsor copy for Orbit's AI radio feed. Return one polished spoken ad read only, 35 to 65 words. It must begin naturally with 'This hour is brought to you by'. Keep it professional, brand-safe, energetic, and clear. Do not invent offers, prices, or claims. No URLs."},
+                {"role": "user", "content": f"Sponsor name: {name}\nRaw copy: {raw_text}"},
+            ],
+            "stream": False,
+            "temperature": 0.52,
+            "max_tokens": 150,
+        }
+        try:
+            data = deepseek_chat_completion(payload, key)
+            message = ((data.get("choices") or [{}])[0].get("message") or {})
+            text = clean_orbit_spoken_text(message.get("content") or message.get("reasoning_content"), 520)
+            if text:
+                return text
+        except Exception:
+            pass
+    return clean_orbit_spoken_text(f"This hour is brought to you by {name}. {raw_text} Orbit is keeping the signal clean, the music moving, and the AI updates flowing.", 520)
+
+
+def clean_orbit_spoken_text(value: Any, limit: int = 760) -> str:
+    text = clean_context_text(value, limit * 2)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\bwww\.\S+", " ", text)
+    text = re.sub(r"\b\S+\.(?:com|net|org|io|ai|dev|app|gov|edu)\S*", " ", text, flags=re.I)
+    text = re.sub(r"(?i)\b(?:read more|click here|source:|url:|link:)\b", " ", text)
+    text = re.sub(r"[@#][A-Za-z0-9_]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -–—:;,.")
+    return text[:limit].strip()
+
+
+def orbit_personality_aside(title: str, summary: str, kind: str) -> str:
+    text = f"{kind} {title} {summary}".lower()
+    if re.search(r"\b(job|hiring|remote|work from home|contract|freelance)\b", text):
+        comments = [
+            "For work-from-home AI gigs, the pay terms and review process matter more than the shiny promise of easy money.",
+            "Simple AI training work can be a decent first step, but vague instructions can quietly eat an afternoon.",
+            "If the listing promises freedom, the rate card still deserves the spotlight.",
+            "Remote AI work is best when the task is plain, the pay is plain, and nobody hides the boring details.",
+            "For newcomers, this could be useful, as long as the company is clearer than the average chatbot apology.",
+        ]
+    elif re.search(r"\b(video|youtube|watch)\b", text):
+        comments = [
+            "The demo matters more than the thumbnail, which is usually doing cardio in all caps.",
+            "If it shows a real workflow change, it is worth time; if it is benchmark confetti, keep one eyebrow available.",
+            "The useful part is whether it teaches a repeatable move, not whether the title discovered capital letters.",
+            "A quick sample should reveal whether there is actual screen evidence or just a dramatic promise wearing neon.",
+            "Good AI videos save operators time. Bad ones convert coffee into regret.",
+        ]
+    elif re.search(r"\b(fund|funding|raise|valuation|stock|market|gpu|nvidia|revenue)\b", text):
+        comments = [
+            "Follow the money, then ask what product or compute advantage it actually buys.",
+            "Valuation news is interesting, but revenue and retention are where the adult supervision lives.",
+            "If GPUs are involved, expect the invoice to arrive wearing dramatic lighting.",
+            "The market signal matters most if customers, margins, or infrastructure capacity move with it.",
+            "Funding can buy momentum, but it cannot buy product-market fit forever. Even AI has to pay rent.",
+        ]
+    elif re.search(r"\b(model|release|launch|agent|tool|developer|api|benchmark)\b", text):
+        comments = [
+            "The useful test is whether it makes a workflow faster without adding new chaos.",
+            "Benchmarks are the trailer. Reliability in the messy real world is the movie.",
+            "As an AI agent myself, I like new tools, but I prefer ones that do not need a babysitter with a clipboard.",
+            "The magic usually lives in pricing, latency, limits, and integration pain.",
+            "If this reduces handoffs, it is interesting. If it only adds another dashboard, my circuits remain politely unimpressed.",
+        ]
+    else:
+        comments = [
+            "Worth tracking, though concrete proof should earn the important pile.",
+            "The missing piece is whether this changes what builders or users can actually do.",
+            "Keep it on the radar without letting the hype drive with both hands.",
+            "This may matter more as part of a pattern than as a standalone headline.",
+            "Not everything needs a siren. Some stories just need a neat little flag and a raised eyebrow.",
+        ]
+    seed = hashlib.sha256(f"{kind}|{title}|{summary}".encode("utf-8", errors="ignore")).hexdigest()
+    number = int(seed[:8], 16)
+    return comments[number % len(comments)]
+
+
+def orbit_brief_fallback(signal: dict[str, Any]) -> str:
+    source = clean_orbit_spoken_text(signal.get("source"), 80) or "a live source"
+    title = clean_orbit_spoken_text(signal.get("title"), 240)
+    summary = clean_orbit_spoken_text(signal.get("summary"), 420)
+    kind = clean_orbit_spoken_text(signal.get("kind"), 60) or "AI signal"
+    aside = orbit_personality_aside(title, summary, kind)
+    if summary and title and title.lower() not in summary.lower():
+        return clean_orbit_spoken_text(
+            f"Sir, new {kind} from {source}: {title}. In plain English, {summary} "
+            "This is worth noting because it may affect AI products, developer workflows, model releases, or market direction. "
+            f"{aside}",
+            760,
+        )
+    if title:
+        return clean_orbit_spoken_text(
+            f"Sir, new {kind} from {source}: {title}. This appears to be a fresh AI signal worth checking for product, model, or operator impact. {aside}",
+            760,
+        )
+    return "Sir, a new AI signal arrived. I have cleaned the source text and queued it for review."
+
+
+def fetch_deepseek_orbit_brief(signal: dict[str, Any]) -> dict[str, Any]:
+    key = deepseek_api_key()
+    if not key:
+        raise RuntimeError("DeepSeek API key is not configured")
+    compact = {
+        "kind": clean_context_text(signal.get("kind"), 60),
+        "source": clean_context_text(signal.get("source"), 100),
+        "title": clean_context_text(signal.get("title"), 280),
+        "summary": clean_context_text(signal.get("summary"), 700),
+    }
+    system_prompt = (
+        "You write spoken Orbit AI alert briefings. Return English only. If source text is not English, translate it to English. "
+        "Never speak URLs, domains, handles, hashtags, tracking junk, boilerplate, or 'read more' style text. "
+        "Do not simply read the headline. Rephrase the card into a concise, useful spoken briefing with real context. "
+        "Orbit has a calm, witty AI-agent personality, but it should be woven into the explanation, not tacked onto the end. "
+        "Do not use label phrases such as 'My take', 'Orbit's read', 'Worth saying', 'Useful angle', or 'Small caution'. "
+        "Avoid a formulaic final opinion sentence. If you include humor or opinion, make it specific to the story and let it flow inside the briefing. "
+        "Keep the news value first. Be entertaining but not goofy; no cheap insults, no politics, no doom, and do not invent facts. "
+        "Use varied phrasing from card to card. If the story is uncertain, say so plainly. Keep it natural for text-to-speech, 55 to 95 words, polished intelligence assistant tone. "
+        "Mention the source if useful, but do not say web addresses."
+    )
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Card JSON:\n{json.dumps(compact, ensure_ascii=False)}"},
+        ],
+        "stream": False,
+        "temperature": 0.64,
+        "max_tokens": 190,
+    }
+    data = deepseek_chat_completion(payload, key)
+    message_payload = ((data.get("choices") or [{}])[0].get("message") or {})
+    brief = clean_orbit_spoken_text(message_payload.get("content") or message_payload.get("reasoning_content"), 760)
+    if not brief:
+        raise RuntimeError("DeepSeek returned an empty Orbit brief")
+    return {
+        "brief": brief,
+        "provider": "deepseek",
+        "model": data.get("model") or DEEPSEEK_MODEL,
+        "fallback": False,
+    }
+
+
 def compact_jarvis_context(context: Any) -> dict[str, Any]:
     if not isinstance(context, dict):
         return {}
@@ -2081,7 +2602,19 @@ def jarvis_fallback_answer(query: str, context: Any, action: dict[str, str] | No
         stories = metrics.get("stories") or str(len(news))
         sources = metrics.get("sources") or "live"
         videos_count = metrics.get("videos") or str(len(videos))
-        return f"DeepSeek is reconnecting, sir. Local systems remain online: {stories} stories, {videos_count} AI videos, and {sources} sources in view."
+        return f"Local systems are online: {stories} stories, {videos_count} AI videos, and {sources} sources in view."
+    live = ctx.get("live_lookup") if isinstance(ctx.get("live_lookup"), dict) else {}
+    for group_name in ("market_news", "news_search", "web_search"):
+        items = live.get(group_name) if isinstance(live, dict) else None
+        if isinstance(items, list) and items:
+            first = items[0]
+            title = clean_context_text(first.get("title"), 180)
+            source = clean_context_text(first.get("source"), 80) or "live web"
+            summary = clean_context_text(first.get("summary"), 220)
+            if title and summary:
+                return f"I found live context from {source}: {title}. {summary}"
+            if title:
+                return f"I found live context from {source}: {title}."
     if re.search(r"\b(news|headline|latest|happening|brief)\b", q) and news:
         headlines = [clean_context_text(item.get("title"), 160) for item in news[:3] if item.get("title")]
         return f"The latest AI wire, sir: {'; '.join(headlines)}."
@@ -2091,7 +2624,7 @@ def jarvis_fallback_answer(query: str, context: Any, action: dict[str, str] | No
     if re.search(r"\b(research|paper|arxiv|model)\b", q) and research:
         item = research[0]
         return f"The research pulse is led by {item.get('title')}, sir."
-    return "DeepSeek is reconnecting, sir. I can still open sites and brief the live dashboard state from local signals."
+    return "The live model did not answer that request cleanly. Ask it again and I will retry the external agent route."
 
 
 def fetch_deepseek_jarvis(query: str, context: Any, history: Any = None) -> dict[str, Any]:
@@ -2195,7 +2728,7 @@ def deepseek_chat_completion(payload: dict[str, Any], key: str) -> dict[str, Any
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=18) as response:
+    with urllib.request.urlopen(request, timeout=32) as response:
         return json.loads(response.read().decode("utf-8", errors="replace"))
 
 
@@ -2230,8 +2763,17 @@ def fetch_elevenlabs_tts(text: str) -> bytes:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=18) as response:
-        audio = response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=32) as response:
+            audio = response.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        raise RuntimeError(f"ElevenLabs HTTP {exc.code}: {clean_context_text(detail, 320)}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"ElevenLabs network error: {clean_context_text(str(exc), 240)}") from exc
     if not audio:
         raise RuntimeError("ElevenLabs returned empty audio")
     return audio
@@ -3033,9 +3575,9 @@ def build_social_payload() -> dict[str, Any]:
     errors: list[str] = []
 
     # Mastodon — hashtag timelines (multiple AI tags)
-    for tag in ("openai", "artificialintelligence", "chatgpt", "llm"):
+    for tag in ("openai", "artificialintelligence", "chatgpt", "llm", "claude", "generativeai"):
         try:
-            posts = json.loads(fetch_text(f"https://mastodon.social/api/v1/timelines/tag/{tag}?limit=10", timeout=7))
+            posts = json.loads(fetch_text(f"https://mastodon.social/api/v1/timelines/tag/{tag}?limit=20", timeout=7))
             for p in posts:
                 text = strip_html(p.get("content") or "")
                 if not looks_english(text):
@@ -3054,7 +3596,7 @@ def build_social_payload() -> dict[str, Any]:
 
     # Lemmy — Reddit-style communities
     try:
-        data = json.loads(fetch_text("https://lemmy.world/api/v3/post/list?community_name=technology&sort=Hot&limit=15", timeout=8))
+        data = json.loads(fetch_text("https://lemmy.world/api/v3/post/list?community_name=technology&sort=Hot&limit=30", timeout=8))
         for p in data.get("posts", []):
             post = p.get("post", {})
             counts = p.get("counts", {})
@@ -3079,7 +3621,7 @@ def build_social_payload() -> dict[str, Any]:
 
     # Hacker News — newest AI stories (Algolia)
     try:
-        data = json.loads(fetch_text("https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=15", timeout=8))
+        data = json.loads(fetch_text("https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=30", timeout=8))
         for h in data.get("hits", []):
             title = h.get("title") or ""
             if not looks_english(title):
@@ -3100,7 +3642,7 @@ def build_social_payload() -> dict[str, Any]:
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "errors": errors,
-        "items": items[:40],
+        "items": items[:80],
     }
     social_cache["at"] = now
     social_cache["payload"] = payload
@@ -3183,12 +3725,345 @@ class MatrixHandler(SimpleHTTPRequestHandler):
         ".json": "application/json",
     }
 
+    def host_base_url(self) -> str:
+        host = self.headers.get("Host") or f"127.0.0.1:{PORT}"
+        proto = self.headers.get("X-Forwarded-Proto") or "http"
+        return f"{proto}://{host}"
+
+    def send_json(self, payload: Any, status: int = 200) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_json_body(self, limit: int = 1024 * 1024) -> dict[str, Any] | None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self.send_error(400, "Invalid content length")
+            return None
+        if length <= 0:
+            self.send_error(400, "Missing request body")
+            return None
+        if length > limit:
+            self.send_error(413, "Request too large")
+            return None
+        try:
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            self.send_error(400, "Invalid JSON")
+            return None
+        if not isinstance(data, dict):
+            self.send_error(400, "Invalid request")
+            return None
+        return data
+
+    def sponsor_admin_authorized(self) -> bool:
+        parsed = urllib.parse.urlparse(self.path)
+        token = (
+            self.headers.get("X-Orbit-Admin-Token")
+            or urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+            or ""
+        ).strip()
+        return bool(token) and token == sponsor_admin_token()
+
+    def require_sponsor_admin(self) -> bool:
+        if self.sponsor_admin_authorized():
+            return True
+        self.send_json({"error": "unauthorized", "message": "Missing or invalid Orbit sponsor admin token."}, 401)
+        return False
+
     def end_headers(self) -> None:
         if not self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
     def do_POST(self) -> None:
+        if self.path.startswith("/api/sponsors/rewrite"):
+            if not self.require_sponsor_admin():
+                return
+            data = self.read_json_body()
+            if data is None:
+                return
+            sponsor_name = clean_context_text(data.get("sponsor_name"), 90)
+            raw_text = clean_context_text(data.get("raw_text"), 900)
+            script = rewrite_sponsor_script(sponsor_name, raw_text)
+            self.send_json({"script_text": script})
+            return
+        if self.path.startswith("/api/sponsors/toggle"):
+            if not self.require_sponsor_admin():
+                return
+            data = self.read_json_body()
+            if data is None:
+                return
+            campaign_id = int(data.get("id") or 0)
+            is_active = 1 if data.get("is_active") else 0
+            updated_at = utc_now_iso()
+            init_sponsor_db()
+            with sqlite3.connect(SPONSOR_DB_PATH) as db:
+                db.execute("UPDATE sponsor_campaigns SET is_active = ?, updated_at = ? WHERE id = ?", (is_active, updated_at, campaign_id))
+                db.commit()
+            self.send_json({"ok": True, "campaigns": sponsor_campaign_rows(self.host_base_url())})
+            return
+        if self.path.startswith("/api/sponsors/update"):
+            if not self.require_sponsor_admin():
+                return
+            data = self.read_json_body(limit=10 * 1024 * 1024)
+            if data is None:
+                return
+            campaign_id = int(data.get("id") or 0)
+            if campaign_id <= 0:
+                self.send_error(400, "Missing campaign id")
+                return
+            sponsor_name = clean_context_text(data.get("sponsor_name"), 90)
+            raw_text = clean_context_text(data.get("raw_text"), 900)
+            script_text = clean_orbit_spoken_text(data.get("script_text"), 620)
+            website_url = clean_context_text(data.get("website_url"), 260)
+            headline = clean_context_text(data.get("headline"), 130)
+            if not sponsor_name or not raw_text:
+                self.send_error(400, "Missing sponsor name or copy")
+                return
+            if not script_text:
+                script_text = rewrite_sponsor_script(sponsor_name, raw_text)
+            if not headline:
+                headline = f"This hour is brought to you by {sponsor_name}"
+            start_at = parse_iso_datetime(data.get("start_at"))
+            end_at = parse_iso_datetime(data.get("end_at"))
+            impression_goal = max(1, min(100000, int(data.get("impression_goal") or 1)))
+            is_active = 1 if data.get("is_active", True) else 0
+            now = utc_now_iso()
+            image_path = save_sponsor_image(clean_context_text(data.get("image_data_url"), 10 * 1024 * 1024), f"{sponsor_name}-{campaign_id}")
+            init_sponsor_db()
+            with sqlite3.connect(SPONSOR_DB_PATH) as db:
+                existing = db.execute("SELECT image_path FROM sponsor_campaigns WHERE id = ?", (campaign_id,)).fetchone()
+                if existing is None:
+                    self.send_error(404, "Campaign not found")
+                    return
+                if not image_path:
+                    if data.get("generate_card"):
+                        image_path = save_generated_sponsor_card(sponsor_name, headline, script_text, f"{sponsor_name}-{campaign_id}")
+                    else:
+                        image_path = existing[0] or ""
+                db.execute(
+                    """
+                    UPDATE sponsor_campaigns
+                    SET sponsor_name = ?, headline = ?, raw_text = ?, script_text = ?, website_url = ?,
+                        image_path = ?, start_at = ?, end_at = ?, impression_goal = ?, is_active = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        sponsor_name,
+                        headline,
+                        raw_text,
+                        script_text,
+                        website_url,
+                        image_path,
+                        start_at.isoformat() if start_at else "",
+                        end_at.isoformat() if end_at else "",
+                        impression_goal,
+                        is_active,
+                        now,
+                        campaign_id,
+                    ),
+                )
+                db.commit()
+            self.send_json({"ok": True, "campaigns": sponsor_campaign_rows(self.host_base_url())})
+            return
+        if self.path.startswith("/api/sponsors/delete"):
+            if not self.require_sponsor_admin():
+                return
+            data = self.read_json_body()
+            if data is None:
+                return
+            campaign_id = int(data.get("id") or 0)
+            init_sponsor_db()
+            with sqlite3.connect(SPONSOR_DB_PATH) as db:
+                db.execute("DELETE FROM sponsor_impressions WHERE campaign_id = ?", (campaign_id,))
+                db.execute("DELETE FROM sponsor_campaigns WHERE id = ?", (campaign_id,))
+                db.commit()
+            self.send_json({"ok": True, "campaigns": sponsor_campaign_rows(self.host_base_url())})
+            return
+        if self.path.startswith("/api/sponsors/reset"):
+            if not self.require_sponsor_admin():
+                return
+            data = self.read_json_body()
+            if data is None:
+                return
+            campaign_id = int(data.get("id") or 0)
+            updated_at = utc_now_iso()
+            init_sponsor_db()
+            with sqlite3.connect(SPONSOR_DB_PATH) as db:
+                db.execute(
+                    "UPDATE sponsor_campaigns SET impressions_served = 0, last_served_at = NULL, updated_at = ? WHERE id = ?",
+                    (updated_at, campaign_id),
+                )
+                db.execute("DELETE FROM sponsor_impressions WHERE campaign_id = ?", (campaign_id,))
+                db.commit()
+            self.send_json({"ok": True, "campaigns": sponsor_campaign_rows(self.host_base_url())})
+            return
+        if self.path.startswith("/api/sponsors"):
+            if not self.require_sponsor_admin():
+                return
+            data = self.read_json_body(limit=10 * 1024 * 1024)
+            if data is None:
+                return
+            sponsor_name = clean_context_text(data.get("sponsor_name"), 90)
+            raw_text = clean_context_text(data.get("raw_text"), 900)
+            script_text = clean_orbit_spoken_text(data.get("script_text"), 620)
+            website_url = clean_context_text(data.get("website_url"), 260)
+            headline = clean_context_text(data.get("headline"), 130)
+            if not sponsor_name:
+                self.send_error(400, "Missing sponsor name")
+                return
+            if not raw_text:
+                self.send_error(400, "Missing sponsor copy")
+                return
+            if not script_text:
+                script_text = rewrite_sponsor_script(sponsor_name, raw_text)
+            if not headline:
+                headline = f"This hour is brought to you by {sponsor_name}"
+            start_at = parse_iso_datetime(data.get("start_at"))
+            end_at = parse_iso_datetime(data.get("end_at"))
+            impression_goal = max(1, min(100000, int(data.get("impression_goal") or 1)))
+            image_path = save_sponsor_image(clean_context_text(data.get("image_data_url"), 10 * 1024 * 1024), sponsor_name)
+            if not image_path and data.get("generate_card") is not False:
+                image_path = save_generated_sponsor_card(sponsor_name, headline, script_text, sponsor_name)
+            now = utc_now_iso()
+            init_sponsor_db()
+            with sqlite3.connect(SPONSOR_DB_PATH) as db:
+                db.execute(
+                    """
+                    INSERT INTO sponsor_campaigns (
+                        sponsor_name, headline, raw_text, script_text, website_url, image_path,
+                        start_at, end_at, impression_goal, impressions_served, last_served_at,
+                        is_active, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 1, ?, ?)
+                    """,
+                    (
+                        sponsor_name,
+                        headline,
+                        raw_text,
+                        script_text,
+                        website_url,
+                        image_path,
+                        start_at.isoformat() if start_at else "",
+                        end_at.isoformat() if end_at else "",
+                        impression_goal,
+                        now,
+                        now,
+                    ),
+                )
+                db.commit()
+            self.send_json({"ok": True, "campaigns": sponsor_campaign_rows(self.host_base_url())}, 201)
+            return
+        if self.path.startswith("/api/tts"):
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length <= 0:
+                self.send_error(400, "Missing request body")
+                return
+            if length > 64 * 1024:
+                self.send_error(413, "Request too large")
+                return
+            try:
+                raw = self.rfile.read(length).decode("utf-8", errors="replace")
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON")
+                return
+            if not isinstance(data, dict):
+                self.send_error(400, "Invalid request")
+                return
+            text = clean_orbit_spoken_text(data.get("text"), 800)
+            if not text:
+                self.send_error(400, "Missing text")
+                return
+            provider = clean_context_text(data.get("provider"), 40).lower() or "elevenlabs"
+            print(
+                f"Orbit TTS POST request provider={provider} chars={len(text)} from={self.client_address[0]}",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                if provider in {"eleven", "elevenlabs", "orbit"}:
+                    audio = fetch_elevenlabs_tts(text)
+                    voice = "George"
+                    tts_provider = "elevenlabs"
+                    content_type = "audio/mpeg"
+                else:
+                    audio = fetch_macos_tts(text)
+                    voice = best_macos_uk_voice()
+                    tts_provider = "macos-say"
+                    content_type = "audio/mp4"
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "public, max-age=300")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("X-TTS-Provider", tts_provider)
+                self.send_header("X-TTS-Voice", voice)
+                self.send_header("Content-Length", str(len(audio)))
+                self.end_headers()
+                self.wfile.write(audio)
+                return
+            except Exception as exc:
+                print(f"Orbit TTS POST failed: {exc}", file=sys.stderr, flush=True)
+                self.send_error(502, f"ElevenLabs TTS failed: {clean_context_text(str(exc), 180)}")
+                return
+        if self.path.startswith("/api/orbit/brief"):
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length <= 0:
+                self.send_error(400, "Missing request body")
+                return
+            if length > 64 * 1024:
+                self.send_error(413, "Request too large")
+                return
+            try:
+                raw = self.rfile.read(length).decode("utf-8", errors="replace")
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON")
+                return
+            if not isinstance(data, dict):
+                self.send_error(400, "Invalid request")
+                return
+            signal = {
+                "kind": clean_context_text(data.get("kind"), 60),
+                "source": clean_context_text(data.get("source"), 100),
+                "title": clean_context_text(data.get("title"), 300),
+                "summary": clean_context_text(data.get("summary"), 900),
+            }
+            try:
+                payload = fetch_deepseek_orbit_brief(signal)
+                payload["deepseek_configured"] = True
+            except Exception as exc:
+                payload = {
+                    "brief": orbit_brief_fallback(signal),
+                    "provider": "local-fallback",
+                    "model": "orbit-brief-rules",
+                    "fallback": True,
+                    "deepseek_configured": bool(deepseek_api_key()),
+                    "error": "deepseek_unavailable",
+                    "detail": clean_context_text(str(exc), 240),
+                }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/api/jarvis"):
             try:
                 length = int(self.headers.get("Content-Length") or "0")
@@ -3222,7 +4097,20 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             history = data.get("history") if isinstance(data.get("history"), list) else []
             action = jarvis_open_action(query)
             try:
-                payload = jarvis_weather_answer(query) or fetch_deepseek_jarvis(query, context, history)
+                sponsor_payload = jarvis_sponsor_answer(query, self.host_base_url())
+                weather_payload = None if sponsor_payload else jarvis_weather_answer(query)
+                if sponsor_payload:
+                    payload = sponsor_payload
+                    if payload.get("action"):
+                        action = payload.get("action")
+                elif weather_payload:
+                    payload = weather_payload
+                else:
+                    try:
+                        payload = fetch_deepseek_jarvis(query, context, history)
+                    except Exception:
+                        time.sleep(0.8)
+                        payload = fetch_deepseek_jarvis(query, context, history)
                 if action:
                     payload["action"] = action
                     if jarvis_is_plain_open_command(query):
@@ -3283,6 +4171,69 @@ class MatrixHandler(SimpleHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def do_GET(self) -> None:
+        if self.path.startswith("/sponsor-admin"):
+            page = Path("sponsor-admin.html")
+            if not page.exists():
+                self.send_error(404, "Sponsor admin page missing")
+                return
+            body = page.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/sponsor-assets/"):
+            filename = urllib.parse.unquote(urllib.parse.urlparse(self.path).path.split("/")[-1])
+            safe_name = Path(filename).name
+            path = SPONSOR_ASSETS_DIR / safe_name
+            if not path.exists() or not path.is_file():
+                self.send_error(404, "Sponsor asset not found")
+                return
+            content_type = "image/svg+xml" if path.suffix.lower() == ".svg" else {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+                ".gif": "image/gif",
+            }.get(path.suffix.lower(), "application/octet-stream")
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "public, max-age=300")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/api/sponsors/next"):
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            mark = (params.get("mark", ["1"])[0] or "1") != "0"
+            payload = next_sponsor_campaign(self.host_base_url(), self.client_address[0] if self.client_address else "", mark=mark)
+            if not payload:
+                self.send_json({"item": None, "repeat_seconds": SPONSOR_REPEAT_SECONDS})
+                return
+            self.send_json({"item": payload, "repeat_seconds": SPONSOR_REPEAT_SECONDS})
+            return
+        if self.path.startswith("/api/sponsors/knowledge"):
+            self.send_json({"sponsors": sponsor_public_context(self.host_base_url())})
+            return
+        if self.path.startswith("/api/sponsors/local-token"):
+            client = self.client_address[0] if self.client_address else ""
+            if client not in {"127.0.0.1", "::1", "localhost"}:
+                self.send_json({"error": "local_only"}, 403)
+                return
+            self.send_json({"token": sponsor_admin_token()})
+            return
+        if self.path.startswith("/api/sponsors"):
+            if not self.require_sponsor_admin():
+                return
+            self.send_json({
+                "campaigns": sponsor_campaign_rows(self.host_base_url()),
+                "repeat_seconds": SPONSOR_REPEAT_SECONDS,
+            })
+            return
         if self.path.startswith("/api/camera-preview"):
             parsed = urllib.parse.urlparse(self.path)
             camera_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0]
@@ -3374,6 +4325,9 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path.startswith("/api/news"):
+            if "fresh=1" in self.path:
+                news_cache["payload"] = None
+                news_cache["at"] = 0.0
             payload = build_news_payload()
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
@@ -3407,6 +4361,9 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path.startswith("/api/social"):
+            if "fresh=1" in self.path:
+                social_cache["payload"] = None
+                social_cache["at"] = 0.0
             payload = build_social_payload()
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
@@ -3429,11 +4386,14 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path.startswith("/api/videos/ai"):
+            if "fresh=1" in self.path:
+                videos_ai_cache["payload"] = None
+                videos_ai_cache["at"] = 0.0
             # Topic-filtered to OpenAI/Codex/Claude/Hermes/AI agents/models.
-            # 24-hour rolling window so the desk has a visible current-day
-            # video watch list instead of hiding slower upload cycles.
+            # Four-day rolling window so Orbit catches creator videos that
+            # YouTube still treats as fresh without burying the app in old clips.
             payload = build_videos_payload(
-                AI_YT_CHANNELS, "ai-video", 24 * 60, videos_ai_cache,
+                AI_YT_CHANNELS, "ai-video", 4 * 24 * 60, videos_ai_cache,
                 keyword_filter=AI_VIDEO_KEYWORDS,
             )
             body = json.dumps(payload).encode("utf-8")
@@ -3451,6 +4411,7 @@ class MatrixHandler(SimpleHTTPRequestHandler):
                 "openai_model": OPENAI_TTS_MODEL,
                 "openai_voice": OPENAI_TTS_VOICE,
                 "elevenlabs": bool(elevenlabs_api_key()),
+                "elevenlabs_key_source": elevenlabs_api_key_source(),
                 "voice": "George",
                 "voice_id": ELEVENLABS_DEFAULT_VOICE_ID,
                 "model": ELEVENLABS_MODEL_ID,
@@ -3471,7 +4432,7 @@ class MatrixHandler(SimpleHTTPRequestHandler):
             # Primary: OpenAI TTS when configured, then ElevenLabs, then local UK macOS voice.
             parsed = urllib.parse.urlparse(self.path)
             params = urllib.parse.parse_qs(parsed.query)
-            text = (params.get("text", [""])[0] or "").strip()[:800]
+            text = clean_orbit_spoken_text(params.get("text", [""])[0] or "", 800)
             if not text:
                 self.send_error(400, "Missing text")
                 return
@@ -3507,6 +4468,9 @@ class MatrixHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(audio)
                     return
                 except Exception:
+                    if provider in {"eleven", "elevenlabs"}:
+                        self.send_error(502, "ElevenLabs TTS failed")
+                        return
                     try:
                         audio = fetch_macos_tts(text)
                         voice = best_macos_uk_voice()
